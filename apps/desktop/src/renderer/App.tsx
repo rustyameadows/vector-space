@@ -121,11 +121,23 @@ const createPreviewApi = (): VectorSpaceApi => {
   };
 };
 
+const getRendererApi = (): VectorSpaceApi => {
+  const maybeApi = (window as Window & { vectorSpace?: VectorSpaceApi }).vectorSpace;
+
+  if (maybeApi) {
+    return maybeApi;
+  }
+
+  const isElectronRenderer = navigator.userAgent.toLowerCase().includes('electron');
+  if (isElectronRenderer) {
+    throw new Error('Vector Space preload API is unavailable in Electron.');
+  }
+
+  return createPreviewApi();
+};
+
 export const App = () => {
-  const api = useMemo(
-    () => (window as Window & { vectorSpace?: VectorSpaceApi }).vectorSpace ?? createPreviewApi(),
-    []
-  );
+  const api = useMemo(() => getRendererApi(), []);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [search, setSearch] = useState('');
