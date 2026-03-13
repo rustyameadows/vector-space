@@ -1,7 +1,12 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AppAssetView, AssetRecord } from '../types/domain';
+import type {
+  AppAssetView,
+  AssetRecord,
+  EmbeddingRecord,
+  EmbeddingRole
+} from '../types/domain';
 
 const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS assets (
@@ -13,7 +18,12 @@ const MIGRATIONS = [
     height INTEGER NOT NULL,
     checksum TEXT NOT NULL,
     status TEXT NOT NULL,
-    source_path TEXT NOT NULL
+    source_path TEXT NOT NULL,
+    source_url TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    user_note TEXT NOT NULL DEFAULT '',
+    retrieval_caption TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}'
   );`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_checksum ON assets(checksum);`,
   `CREATE TABLE IF NOT EXISTS asset_files (
@@ -35,16 +45,33 @@ const MIGRATIONS = [
     FOREIGN KEY(asset_id) REFERENCES assets(id)
   );`,
   `CREATE TABLE IF NOT EXISTS embeddings (
+    id TEXT PRIMARY KEY,
     asset_id TEXT NOT NULL,
+    role TEXT NOT NULL,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
+    task_type TEXT NOT NULL,
     vector_dim INTEGER NOT NULL,
     vector_blob TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    version TEXT NOT NULL,
-    PRIMARY KEY(asset_id, provider, model, version),
+    preprocessing_version INTEGER NOT NULL,
+    extraction_version INTEGER NOT NULL,
+    ocr_version INTEGER NOT NULL,
+    embedding_version TEXT NOT NULL,
     FOREIGN KEY(asset_id) REFERENCES assets(id)
   );`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_embeddings_unique_role_version
+    ON embeddings(asset_id, role, provider, model, embedding_version);`,
+  `CREATE TABLE IF NOT EXISTS asset_text_chunks (
+    id TEXT PRIMARY KEY,
+    asset_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    section TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(asset_id) REFERENCES assets(id)
+  );`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_text_chunks_asset_id ON asset_text_chunks(asset_id);`,
   `CREATE TABLE IF NOT EXISTS collections (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -81,6 +108,14 @@ const MIGRATIONS = [
   );`
 ];
 
+const ALTERS = [
+  `ALTER TABLE assets ADD COLUMN source_url TEXT;`,
+  `ALTER TABLE assets ADD COLUMN title TEXT NOT NULL DEFAULT '';`,
+  `ALTER TABLE assets ADD COLUMN user_note TEXT NOT NULL DEFAULT '';`,
+  `ALTER TABLE assets ADD COLUMN retrieval_caption TEXT NOT NULL DEFAULT '';`,
+  `ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';`
+];
+
 export class VectorSpaceDb {
   private db: Database.Database;
 
@@ -94,6 +129,13 @@ export class VectorSpaceDb {
   private migrate(): void {
     const tx = this.db.transaction(() => {
       MIGRATIONS.forEach((statement) => this.db.exec(statement));
+      ALTERS.forEach((statement) => {
+        try {
+          this.db.exec(statement);
+        } catch {
+          // no-op when column already exists
+        }
+      });
     });
     tx();
   }
@@ -110,12 +152,22 @@ export class VectorSpaceDb {
     asset: AssetRecord,
     originalPath: string,
     originalSize: number,
-    thumbPath: string
+    thumbPath: string,
+    metadata: {
+      title: string;
+      userNote: string;
+      sourceUrl?: string;
+      retrievalCaption: string;
+      metadataJson: string;
+    }
   ): void {
     const insert = this.db.transaction(() => {
       this.db
         .prepare(
-          'INSERT INTO assets(id, created_at, import_source, mime, width, height, checksum, status, source_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          `INSERT INTO assets(
+            id, created_at, import_source, mime, width, height, checksum, status, source_path,
+            source_url, title, user_note, retrieval_caption, metadata_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           asset.id,
@@ -126,7 +178,12 @@ export class VectorSpaceDb {
           asset.height,
           asset.checksum,
           asset.status,
-          asset.sourcePath
+          asset.sourcePath,
+          metadata.sourceUrl ?? null,
+          metadata.title,
+          metadata.userNote,
+          metadata.retrievalCaption,
+          metadata.metadataJson
         );
 
       this.db
@@ -145,29 +202,61 @@ export class VectorSpaceDb {
     insert();
   }
 
-  public upsertEmbedding(
+  public replaceAssetTextChunks(
     assetId: string,
-    vector: number[],
-    provider: string,
-    model: string,
-    version: string
+    chunks: Array<{ section: string; content: string }>
+  ): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM asset_text_chunks WHERE asset_id = ?').run(assetId);
+      const insert = this.db.prepare(
+        `INSERT INTO asset_text_chunks(id, asset_id, chunk_index, section, content, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      );
+      const now = new Date().toISOString();
+      chunks.forEach((chunk, index) => {
+        insert.run(randomUUID(), assetId, index, chunk.section, chunk.content, now);
+      });
+    });
+    tx();
+  }
+
+  public upsertEmbedding(
+    record: Omit<EmbeddingRecord, 'dimension'> & {
+      provider: string;
+      embeddingVersion: string;
+    }
   ): void {
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO embeddings(asset_id, provider, model, vector_dim, vector_blob, created_at, version)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO embeddings(
+          id, asset_id, role, provider, model, task_type, vector_dim, vector_blob, created_at,
+          preprocessing_version, extraction_version, ocr_version, embedding_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(asset_id, role, provider, model, embedding_version)
+        DO UPDATE SET
+          task_type = excluded.task_type,
+          vector_dim = excluded.vector_dim,
+          vector_blob = excluded.vector_blob,
+          created_at = excluded.created_at,
+          preprocessing_version = excluded.preprocessing_version,
+          extraction_version = excluded.extraction_version,
+          ocr_version = excluded.ocr_version`
       )
       .run(
-        assetId,
-        provider,
-        model,
-        vector.length,
-        JSON.stringify(vector),
+        randomUUID(),
+        record.assetId,
+        record.role,
+        record.provider,
+        record.model,
+        record.taskType,
+        record.vector.length,
+        JSON.stringify(record.vector),
         new Date().toISOString(),
-        version
+        record.preprocessingVersion,
+        record.extractionVersion,
+        record.ocrVersion,
+        record.embeddingVersion
       );
-
-    this.setAssetStatus(assetId, 'ready');
   }
 
   public setAssetStatus(assetId: string, status: string): void {
@@ -186,7 +275,7 @@ export class VectorSpaceDb {
   public listAssets(): AppAssetView[] {
     const rows = this.db
       .prepare(
-        `SELECT a.id, a.created_at, a.mime, a.width, a.height, a.status,
+        `SELECT a.id, a.created_at, a.mime, a.width, a.height, a.status, a.retrieval_caption,
         t.local_path as thumbnail_path,
         of.local_path as original_path
         FROM assets a
@@ -201,6 +290,7 @@ export class VectorSpaceDb {
       width: number;
       height: number;
       status: 'imported' | 'indexing' | 'ready' | 'failed';
+      retrieval_caption: string;
       thumbnail_path: string | null;
       original_path: string;
     }>;
@@ -214,27 +304,145 @@ export class VectorSpaceDb {
       status: row.status,
       thumbnailPath: row.thumbnail_path,
       originalPath: row.original_path,
+      retrievalCaption: row.retrieval_caption,
       tags: this.listTagsForAsset(row.id),
       collections: this.listCollectionsForAsset(row.id)
     }));
   }
 
-  public listEmbeddings(): Array<{ assetId: string; vector: number[] }> {
+  public getAssetById(assetId: string):
+    | {
+        id: string;
+        title: string;
+        userNote: string;
+        retrievalCaption: string;
+        originalPath: string;
+        tags: string[];
+        collections: string[];
+      }
+    | null {
+    const row = this.db
+      .prepare(
+        `SELECT a.id, a.title, a.user_note, a.retrieval_caption, of.local_path as original_path
+        FROM assets a
+        LEFT JOIN asset_files of ON of.asset_id = a.id AND of.role='original'
+        WHERE a.id = ? LIMIT 1`
+      )
+      .get(assetId) as
+      | {
+          id: string;
+          title: string;
+          user_note: string;
+          retrieval_caption: string;
+          original_path: string;
+        }
+      | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      title: row.title,
+      userNote: row.user_note,
+      retrievalCaption: row.retrieval_caption,
+      originalPath: row.original_path,
+      tags: this.listTagsForAsset(row.id),
+      collections: this.listCollectionsForAsset(row.id)
+    };
+  }
+
+  public listEmbeddings(role: EmbeddingRole): Array<{ assetId: string; vector: number[] }> {
     const rows = this.db
       .prepare(
         `SELECT e.asset_id, e.vector_blob FROM embeddings e
         INNER JOIN (
-          SELECT asset_id, MAX(created_at) as latest
+          SELECT asset_id, role, MAX(created_at) as latest
           FROM embeddings
-          GROUP BY asset_id
+          WHERE role = ?
+          GROUP BY asset_id, role
         ) latest_embedding
-        ON e.asset_id = latest_embedding.asset_id AND e.created_at = latest_embedding.latest`
+        ON e.asset_id = latest_embedding.asset_id
+          AND e.role = latest_embedding.role
+          AND e.created_at = latest_embedding.latest`
       )
-      .all() as Array<{ asset_id: string; vector_blob: string }>;
+      .all(role) as Array<{ asset_id: string; vector_blob: string }>;
 
     return rows.map((row) => ({
       assetId: row.asset_id,
       vector: JSON.parse(row.vector_blob) as number[]
+    }));
+  }
+
+  public getAssetSearchDocument(assetId: string): string {
+    const row = this.db
+      .prepare(
+        `SELECT title, user_note, retrieval_caption FROM assets WHERE id = ? LIMIT 1`
+      )
+      .get(assetId) as
+      | {
+          title: string;
+          user_note: string;
+          retrieval_caption: string;
+        }
+      | undefined;
+
+    if (!row) {
+      return '';
+    }
+
+    const chunks = this.db
+      .prepare('SELECT content FROM asset_text_chunks WHERE asset_id = ? ORDER BY chunk_index ASC')
+      .all(assetId) as Array<{ content: string }>;
+
+    return [
+      row.title,
+      row.user_note,
+      row.retrieval_caption,
+      this.listTagsForAsset(assetId).join(' '),
+      this.listCollectionsForAsset(assetId).join(' '),
+      chunks.map((chunk) => chunk.content).join(' ')
+    ]
+      .join(' ')
+      .trim();
+  }
+
+  public listAssetsForSearch(): Array<{
+    assetId: string;
+    title: string;
+    userNote: string;
+    retrievalCaption: string;
+    tags: string[];
+    collections: string[];
+    status: string;
+    mime: string;
+    createdAt: string;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT id as asset_id, title, user_note, retrieval_caption, status, mime, created_at FROM assets`
+      )
+      .all() as Array<{
+      asset_id: string;
+      title: string;
+      user_note: string;
+      retrieval_caption: string;
+      status: string;
+      mime: string;
+      created_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      assetId: row.asset_id,
+      title: row.title,
+      userNote: row.user_note,
+      retrievalCaption: row.retrieval_caption,
+      tags: this.listTagsForAsset(row.asset_id),
+      collections: this.listCollectionsForAsset(row.asset_id),
+      status: row.status,
+      mime: row.mime,
+      createdAt: row.created_at
     }));
   }
 

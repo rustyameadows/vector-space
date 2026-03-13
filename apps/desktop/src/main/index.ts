@@ -12,6 +12,7 @@ import {
 } from './embedding/keychain';
 import { IndexingService } from './services/indexingService';
 import { HybridSearchService } from './search/hybridSearch';
+import type { SearchMode } from './types/domain';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 
@@ -197,6 +198,48 @@ const seedDemoData = async (): Promise<{
   return { ...result, outputDir };
 };
 
+const runSearch = async (params: {
+  mode: SearchMode;
+  text?: string;
+  imagePath?: string;
+}): Promise<ReturnType<HybridSearchService['search']>> => {
+  const provider = requireEmbeddingProvider();
+  const vectors: Parameters<HybridSearchService['search']>[0]['vectors'] = {};
+
+  const normalizedText = params.text?.trim();
+  if (normalizedText) {
+    vectors.text = await provider.embed({
+      taskType: 'RETRIEVAL_QUERY',
+      textParts: [normalizedText]
+    });
+  }
+
+  if (params.imagePath) {
+    const file = await fs.readFile(params.imagePath);
+    vectors.visual = await provider.embed({ taskType: 'RETRIEVAL_QUERY', imageBuffer: file });
+
+    if (normalizedText) {
+      vectors.joint = await provider.embed({
+        taskType: 'RETRIEVAL_QUERY',
+        imageBuffer: file,
+        textParts: [normalizedText]
+      });
+    }
+  } else if (normalizedText) {
+    vectors.joint = await provider.embed({
+      taskType: 'RETRIEVAL_QUERY',
+      textParts: [normalizedText]
+    });
+  }
+
+  return searchService.search({
+    mode: params.mode,
+    text: normalizedText,
+    vectors,
+    filters: { onlyOfflineReady: true }
+  });
+};
+
 const registerIpc = (): void => {
   ipcMain.handle('library:list-assets', () => db.listAssets());
   ipcMain.handle('library:list-jobs', () => db.listIndexJobs());
@@ -313,14 +356,11 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle('library:search-text', async (_event, query: string) => {
-    const vector = await requireEmbeddingProvider().embedText(query);
-    return searchService.searchByVector(vector, { onlyOfflineReady: true });
+    return runSearch({ text: query, mode: 'exploration' });
   });
 
   ipcMain.handle('library:search-image', async (_event, imagePath: string) => {
-    const file = await fs.readFile(imagePath);
-    const vector = await requireEmbeddingProvider().embedImage(file);
-    return searchService.searchByVector(vector, { onlyOfflineReady: true });
+    return runSearch({ imagePath, mode: 'similarity' });
   });
 };
 
@@ -334,9 +374,11 @@ app.whenReady().then(async () => {
     indexingService = new IndexingService(db, {
       name: 'gemini',
       model: 'gemini-embedding-001',
-      version: 'v1',
-      embedText: async (input: string) => requireEmbeddingProvider().embedText(input),
-      embedImage: async (buffer: Buffer) => requireEmbeddingProvider().embedImage(buffer)
+      preprocessingVersion: 3,
+      extractionVersion: 2,
+      ocrVersion: 2,
+      outputDimensionality: 3072,
+      embed: async (request) => requireEmbeddingProvider().embed(request)
     });
     searchService = new HybridSearchService(db);
     registerIpc();

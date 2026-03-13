@@ -12,7 +12,9 @@
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
-    "package:mac": "npm run build && electron-packager . \"Vector Space\" --platform=darwin --arch=x64 --out=release --overwrite --app-bundle-id=com.vectorspace.app"
+    "package:mac": "npm run build && electron-packager . \"Vector Space\" --platform=darwin --arch=x64 --out=release --overwrite --app-bundle-id=com.vectorspace.app",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
@@ -31,6 +33,7 @@
     "electron-packager": "^17.1.2",
     "electronmon": "^2.0.3",
     "vite": "^6.2.0",
-    "wait-on": "^8.0.3"
+    "wait-on": "^8.0.3",
+    "vitest": "^2.1.9"
   }
 }
