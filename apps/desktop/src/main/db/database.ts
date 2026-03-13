@@ -239,9 +239,10 @@ export class VectorSpaceDb {
   }
 
   public ensureCollection(name: string): string {
-    const existing = this.db.prepare('SELECT id FROM collections WHERE name = ?').get(name) as
-      | { id: string }
-      | undefined;
+    const normalized = name.trim();
+    const existing = this.db
+      .prepare('SELECT id FROM collections WHERE name = ?')
+      .get(normalized) as { id: string } | undefined;
     if (existing) {
       return existing.id;
     }
@@ -249,7 +250,7 @@ export class VectorSpaceDb {
     const id = randomUUID();
     this.db
       .prepare('INSERT INTO collections(id, name, created_at) VALUES (?, ?, ?)')
-      .run(id, name, new Date().toISOString());
+      .run(id, normalized, new Date().toISOString());
     return id;
   }
 

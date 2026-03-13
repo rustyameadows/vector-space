@@ -9,6 +9,7 @@ interface VectorSpaceApi {
   importFiles: (paths: string[]) => Promise<{ imported: number; skipped: number }>;
   importFolder: (folderPath: string) => Promise<{ imported: number; skipped: number }>;
   importClipboard: () => Promise<{ imported: number; skipped: number }>;
+  seedDemoData: () => Promise<{ imported: number; skipped: number; outputDir: string }>;
   openFileDialog: () => Promise<string[]>;
   openFolderDialog: () => Promise<string | null>;
   createCollection: (name: string) => Promise<{ id: string }>;

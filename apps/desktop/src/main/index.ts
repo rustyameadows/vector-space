@@ -1,11 +1,15 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage } from 'electron';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { initializeLibraryPathing, LibraryPathError } from './library/pathManager';
 import { VectorSpaceDb } from './db/database';
 import { ImportService } from './services/importService';
 import { GeminiEmbeddingProvider, type EmbeddingProvider } from './embedding/provider';
-import { deleteGeminiApiKeyFromKeychain, getGeminiApiKeyFromKeychain, setGeminiApiKeyInKeychain } from './embedding/keychain';
+import {
+  deleteGeminiApiKeyFromKeychain,
+  getGeminiApiKeyFromKeychain,
+  setGeminiApiKeyInKeychain
+} from './embedding/keychain';
 import { IndexingService } from './services/indexingService';
 import { HybridSearchService } from './search/hybridSearch';
 
@@ -17,6 +21,15 @@ let indexingService: IndexingService;
 let searchService: HybridSearchService;
 let embeddingProvider: EmbeddingProvider | null = null;
 let online = true;
+
+const requireNonEmptyName = (value: string, label: string): string => {
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error(`${label} cannot be empty.`);
+  }
+
+  return normalized;
+};
 
 const createWindow = (): void => {
   const window = new BrowserWindow({
@@ -45,7 +58,6 @@ const createWindow = (): void => {
   });
 };
 
-
 const createProviderFromKeychain = async (): Promise<EmbeddingProvider | null> => {
   const apiKey = await getGeminiApiKeyFromKeychain();
   if (!apiKey) {
@@ -57,7 +69,9 @@ const createProviderFromKeychain = async (): Promise<EmbeddingProvider | null> =
 
 const requireEmbeddingProvider = (): EmbeddingProvider => {
   if (!embeddingProvider) {
-    throw new Error('Gemini API key is not configured. Add it in Settings to enable indexing and semantic search.');
+    throw new Error(
+      'Gemini API key is not configured. Add it in Settings to enable indexing and semantic search.'
+    );
   }
 
   return embeddingProvider;
@@ -88,6 +102,10 @@ const enqueueImportedAssets = (assetIds: string[]): void => {
   indexingService.enqueue(assetIds);
 };
 
+const enqueueAllImportedAssets = (): void => {
+  enqueueImportedAssets(getImportedAssetIds());
+};
+
 const importAndMaybeEnqueue = async (
   inputPaths: string[],
   source: 'file-picker' | 'folder' | 'clipboard'
@@ -99,6 +117,49 @@ const importAndMaybeEnqueue = async (
   return result;
 };
 
+const createSeedImagePng = (
+  label: string,
+  width: number,
+  height: number,
+  color: string
+): Buffer => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="${color}"/><text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="#ffffff" font-size="28" font-family="Inter,Arial,sans-serif">${label}</text></svg>`;
+  const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  return nativeImage.createFromDataURL(dataUrl).toPNG();
+};
+
+const seedDemoData = async (): Promise<{
+  imported: number;
+  skipped: number;
+  outputDir: string;
+}> => {
+  const outputDir = path.join(app.getPath('temp'), 'vector-space-demo-seed');
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const specs = [
+    { label: 'Beach', width: 1280, height: 720, color: '#4a90e2' },
+    { label: 'Forest', width: 1280, height: 720, color: '#2e7d32' },
+    { label: 'Sunset', width: 1080, height: 1080, color: '#ff7043' },
+    { label: 'Night', width: 1200, height: 800, color: '#3949ab' },
+    { label: 'City', width: 1440, height: 900, color: '#546e7a' },
+    { label: 'Portrait', width: 800, height: 1200, color: '#8d6e63' }
+  ];
+
+  const paths = await Promise.all(
+    specs.map(async (spec, index) => {
+      const filePath = path.join(outputDir, `demo-${index + 1}-${spec.label.toLowerCase()}.png`);
+      await fs.writeFile(
+        filePath,
+        createSeedImagePng(spec.label, spec.width, spec.height, spec.color)
+      );
+      return filePath;
+    })
+  );
+
+  const result = await importAndMaybeEnqueue(paths, 'folder');
+  return { ...result, outputDir };
+};
+
 const registerIpc = (): void => {
   ipcMain.handle('library:list-assets', () => db.listAssets());
   ipcMain.handle('library:list-jobs', () => db.listIndexJobs());
@@ -106,11 +167,20 @@ const registerIpc = (): void => {
   ipcMain.handle('library:list-collections', () => db.listCollections());
   ipcMain.handle('library:network-state', () => ({ online }));
 
-  ipcMain.handle('library:get-api-settings', () => ({ hasApiKey: Boolean(embeddingProvider), model: 'gemini-embedding-001' }));
+  ipcMain.handle('library:get-api-settings', () => ({
+    hasApiKey: Boolean(embeddingProvider),
+    model: 'gemini-embedding-001'
+  }));
 
   ipcMain.handle('library:set-api-key', async (_event, apiKey: string) => {
-    await setGeminiApiKeyInKeychain(apiKey);
+    const normalizedApiKey = apiKey.trim();
+    if (!normalizedApiKey) {
+      throw new Error('API key cannot be empty.');
+    }
+
+    await setGeminiApiKeyInKeychain(normalizedApiKey);
     embeddingProvider = await createProviderFromKeychain();
+    enqueueAllImportedAssets();
     return { hasApiKey: Boolean(embeddingProvider) };
   });
 
@@ -121,8 +191,18 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle('library:set-network-state', (_event, value: boolean) => {
+    const wasOffline = !online;
     online = value;
+
+    if (wasOffline && online) {
+      enqueueAllImportedAssets();
+    }
+
     return { online };
+  });
+
+  ipcMain.handle('library:seed-demo-data', async () => {
+    return seedDemoData();
   });
 
   ipcMain.handle('library:import-files', async (_event, filePaths: string[]) => {
@@ -146,7 +226,12 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle('library:open-file-dialog', async () => {
-    const response = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] });
+    const response = await dialog.showOpenDialog({
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff'] }
+      ]
+    });
     return response.filePaths;
   });
 
@@ -156,9 +241,11 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle('library:create-collection', (_event, name: string) => ({
-    id: db.ensureCollection(name)
+    id: db.ensureCollection(requireNonEmptyName(name, 'Collection name'))
   }));
-  ipcMain.handle('library:create-tag', (_event, name: string) => ({ id: db.ensureTag(name) }));
+  ipcMain.handle('library:create-tag', (_event, name: string) => ({
+    id: db.ensureTag(requireNonEmptyName(name, 'Tag name'))
+  }));
 
   ipcMain.handle(
     'library:attach-collection',
