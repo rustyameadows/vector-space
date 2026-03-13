@@ -72,6 +72,11 @@ const mapFsError = (error: unknown): LibraryPathError => {
 };
 
 export const resolveLibraryRoot = (): string => {
+  const overrideRoot = process.env.VECTOR_SPACE_LIBRARY_ROOT?.trim();
+  if (overrideRoot) {
+    return path.resolve(overrideRoot);
+  }
+
   if (process.platform !== 'darwin') {
     throw new LibraryPathError(
       'UNSUPPORTED_PLATFORM',

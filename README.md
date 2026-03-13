@@ -4,8 +4,9 @@ Local-first macOS Electron app for a personal visual archive.
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 20 LTS (`20.20.1` verified in this repo)
 - npm 10+
+- Xcode Command Line Tools (`xcode-select --install`)
 - Gemini API key from Google AI Studio
 
 ## Getting started
@@ -14,6 +15,10 @@ Local-first macOS Electron app for a personal visual archive.
 npm install
 npm run dev
 ```
+
+If you use `nvm`, run `nvm use` first. Otherwise install Node 20 LTS and confirm `node -v` prints a `v20.x` release before running `npm install`.
+
+`npm install` now rebuilds the native desktop modules for the checked-in Electron version automatically.
 
 ## Gemini API key setup (macOS keychain)
 
@@ -27,16 +32,46 @@ Use the in-app **Gemini API Key** panel to:
 
 You can remove it anytime with **Clear Key**.
 
+## Supported image imports
+
+- `png`
+- `jpg`
+- `jpeg`
+- `gif`
+- `webp`
+- `bmp`
+- `tiff`
+- `tif`
+
 ## Build
 
 ```bash
 npm run build
 ```
 
+Import-format proof:
+
+```bash
+npm run proof:imports --workspace @vector-space/desktop
+```
+
 ## Package mac artifact
 
 ```bash
-npm run package:mac --workspace @vector-space/desktop
+npm run package:mac
+```
+
+That command now:
+
+- builds the app,
+- rebuilds `better-sqlite3` and `keytar` for the installed Electron version,
+- packages for the current Mac architecture by default (`arm64` on Apple Silicon, `x64` on Intel),
+- writes both a `.app` bundle and a `.zip` into `apps/desktop/release/`.
+
+If you need an Intel build from an Apple Silicon machine, pass the target explicitly:
+
+```bash
+npm run package:mac --workspace @vector-space/desktop -- --arch=x64
 ```
 
 ## Implemented V1 capabilities
@@ -58,5 +93,17 @@ npm run package:mac --workspace @vector-space/desktop
 ```bash
 npm run lint
 npm run typecheck
+npm test
+npm run proof:imports --workspace @vector-space/desktop
 npm run build
+```
+
+## How To Reproduce Upload Proof
+
+```bash
+nvm use
+npm install
+npm test
+npm run proof:imports --workspace @vector-space/desktop
+npm run package:mac
 ```

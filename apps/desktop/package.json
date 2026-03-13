@@ -11,8 +11,10 @@
     "build": "npm run build:main && npm run build:renderer",
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
+    "proof:imports": "npm run build:main && node ./scripts/run-import-format-demo.mjs",
+    "rebuild:native": "node ./scripts/rebuild-native.mjs",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
-    "package:mac": "npm run build && electron-packager . \"Vector Space\" --platform=darwin --arch=x64 --out=release --overwrite --app-bundle-id=com.vectorspace.app",
+    "package:mac": "npm run build && npm run rebuild:native && node ./scripts/package-mac.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -23,6 +25,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.7.2",
     "@types/better-sqlite3": "^7.6.13",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
@@ -32,8 +35,9 @@
     "electron": "^35.0.0",
     "electron-packager": "^17.1.2",
     "electronmon": "^2.0.3",
+    "playwright": "^1.58.2",
     "vite": "^6.2.0",
-    "wait-on": "^8.0.3",
-    "vitest": "^2.1.9"
+    "vitest": "^2.1.9",
+    "wait-on": "^8.0.3"
   }
 }

@@ -359,7 +359,7 @@ export const App = () => {
 
     return asset.thumbnailPath.startsWith('data:')
       ? asset.thumbnailPath
-      : `file://${asset.thumbnailPath}`;
+      : `app://renderer/library-asset?path=${encodeURIComponent(asset.thumbnailPath)}`;
   };
 
   return (

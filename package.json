@@ -4,13 +4,18 @@
   "workspaces": [
     "apps/desktop"
   ],
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "dev": "npm run dev --workspace @vector-space/desktop",
     "build": "npm run build --workspace @vector-space/desktop",
+    "package:mac": "npm run package:mac --workspace @vector-space/desktop",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "postinstall": "npm run rebuild:native --workspace @vector-space/desktop",
     "typecheck": "npm run typecheck --workspace @vector-space/desktop",
     "test": "npm run test --workspace @vector-space/desktop"
   },

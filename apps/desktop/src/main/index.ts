@@ -1,9 +1,15 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol } from 'electron';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { initializeLibraryPathing, LibraryPathError } from './library/pathManager';
+import { pathToFileURL } from 'node:url';
+import {
+  getLibraryPaths,
+  initializeLibraryPathing,
+  LibraryPathError
+} from './library/pathManager';
 import { VectorSpaceDb } from './db/database';
 import { ImportService } from './services/importService';
+import { SUPPORTED_IMAGE_EXTENSIONS } from './services/imageProcessing';
 import { GeminiEmbeddingProvider, type EmbeddingProvider } from './embedding/provider';
 import {
   deleteGeminiApiKeyFromKeychain,
@@ -15,6 +21,19 @@ import { HybridSearchService } from './search/hybridSearch';
 import type { SearchMode } from './types/domain';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const rendererDistPath = path.join(__dirname, '../renderer');
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'app',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true
+    }
+  }
+]);
 
 let db: VectorSpaceDb;
 let importService: ImportService;
@@ -22,6 +41,7 @@ let indexingService: IndexingService;
 let searchService: HybridSearchService;
 let embeddingProvider: EmbeddingProvider | null = null;
 let online = true;
+const isKeychainDisabled = process.env.VECTOR_SPACE_DISABLE_KEYCHAIN === '1';
 
 const requireNonEmptyName = (value: string, label: string): string => {
   const normalized = value.trim();
@@ -30,6 +50,41 @@ const requireNonEmptyName = (value: string, label: string): string => {
   }
 
   return normalized;
+};
+
+const registerAppProtocol = (): void => {
+  protocol.handle('app', (request) => {
+    const url = new URL(request.url);
+    if (url.host !== 'renderer') {
+      return new Response('Not found', { status: 404 });
+    }
+
+    if (url.pathname === '/library-asset') {
+      const requestedPath = url.searchParams.get('path');
+      if (!requestedPath) {
+        return new Response('Missing asset path', { status: 400 });
+      }
+
+      const libraryRoot = path.resolve(getLibraryPaths().root);
+      const assetPath = path.resolve(requestedPath);
+      const allowedPrefix = `${libraryRoot}${path.sep}`;
+
+      if (assetPath !== libraryRoot && !assetPath.startsWith(allowedPrefix)) {
+        return new Response('Forbidden', { status: 403 });
+      }
+
+      return net.fetch(pathToFileURL(assetPath).toString());
+    }
+
+    const requestPath = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
+    const filePath = path.resolve(rendererDistPath, `.${requestPath}`);
+
+    if (!filePath.startsWith(rendererDistPath)) {
+      return new Response('Not found', { status: 404 });
+    }
+
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
 };
 
 const createWindow = (): void => {
@@ -54,12 +109,16 @@ const createWindow = (): void => {
     return;
   }
 
-  window.loadFile(path.join(__dirname, '../renderer/index.html')).catch((error: unknown) => {
-    console.error('Failed to load renderer file', error);
+  window.loadURL('app://renderer/index.html').catch((error: unknown) => {
+    console.error('Failed to load renderer URL', error);
   });
 };
 
 const createProviderFromKeychain = async (): Promise<EmbeddingProvider | null> => {
+  if (isKeychainDisabled) {
+    return null;
+  }
+
   const apiKey = await getGeminiApiKeyFromKeychain();
   if (!apiKey) {
     return null;
@@ -253,6 +312,10 @@ const registerIpc = (): void => {
   }));
 
   ipcMain.handle('library:set-api-key', async (_event, apiKey: string) => {
+    if (isKeychainDisabled) {
+      throw new Error('Gemini API key storage is disabled for this session.');
+    }
+
     const normalizedApiKey = apiKey.trim();
     if (!normalizedApiKey) {
       throw new Error('API key cannot be empty.');
@@ -265,6 +328,10 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle('library:clear-api-key', async () => {
+    if (isKeychainDisabled) {
+      return { hasApiKey: false };
+    }
+
     await deleteGeminiApiKeyFromKeychain();
     embeddingProvider = null;
     return { hasApiKey: false };
@@ -307,11 +374,14 @@ const registerIpc = (): void => {
 
   ipcMain.handle('library:open-file-dialog', async () => {
     const response = await dialog.showOpenDialog({
-      properties: ['openFile', 'multiSelections'],
-      filters: [
-        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff'] }
-      ]
-    });
+        properties: ['openFile', 'multiSelections'],
+        filters: [
+          {
+            name: 'Images',
+            extensions: SUPPORTED_IMAGE_EXTENSIONS.map((extension) => extension.slice(1))
+          }
+        ]
+      });
     return response.filePaths;
   });
 
@@ -366,6 +436,7 @@ const registerIpc = (): void => {
 
 app.whenReady().then(async () => {
   try {
+    registerAppProtocol();
     const libraryPaths = await initializeLibraryPathing();
     db = new VectorSpaceDb(libraryPaths.db);
     importService = new ImportService(db);

@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { nativeImage } from 'electron';
 import { VectorSpaceDb } from '../db/database';
 import {
   getAssetStorageAbsolutePath,
@@ -9,32 +8,26 @@ import {
   getLibraryPaths
 } from '../library/pathManager';
 import type { AssetRecord } from '../types/domain';
+import {
+  createThumbnail,
+  getImageMetadata,
+  SUPPORTED_IMAGE_EXTENSIONS
+} from './imageProcessing';
 
-const SUPPORTED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp']);
+const SUPPORTED_EXTENSIONS = new Set<string>(SUPPORTED_IMAGE_EXTENSIONS);
 
 const extensionToMime = (ext: string): string => {
   if (ext === '.png') return 'image/png';
   if (ext === '.webp') return 'image/webp';
   if (ext === '.gif') return 'image/gif';
   if (ext === '.bmp') return 'image/bmp';
+  if (ext === '.tiff' || ext === '.tif') return 'image/tiff';
   return 'image/jpeg';
 };
 
 const checksumFile = async (inputPath: string): Promise<string> => {
   const buffer = await fs.readFile(inputPath);
   return createHash('sha256').update(buffer).digest('hex');
-};
-
-const ensureParentDirectory = async (filePath: string): Promise<void> => {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-};
-
-const createThumbnail = async (sourcePath: string, outputPath: string): Promise<void> => {
-  const image = nativeImage.createFromPath(sourcePath);
-  const thumb = image.resize({ width: 320, height: 320, quality: 'best' });
-
-  await ensureParentDirectory(outputPath);
-  await fs.writeFile(outputPath, thumb.toPNG());
 };
 
 const deriveTitleFromPath = (inputPath: string): string =>
@@ -82,8 +75,7 @@ export class ImportService {
 
       const id = randomUUID().replace(/-/g, '');
       const sourceStat = await fs.stat(inputPath);
-      const image = nativeImage.createFromPath(inputPath);
-      const size = image.getSize();
+      const size = await getImageMetadata(inputPath);
       const libraryPaths = getLibraryPaths();
       const originalRelative = getAssetStorageRelativePath(
         id,
@@ -91,9 +83,9 @@ export class ImportService {
         'originals'
       );
       const originalAbsolute = path.join(libraryPaths.root, originalRelative);
-      const thumbAbsolute = getAssetStorageAbsolutePath(`${id}-grid`, '.png', 'thumbnails');
+      const thumbAbsolute = getAssetStorageAbsolutePath(`${id}-grid`, 'grid.png', 'thumbnails');
 
-      await ensureParentDirectory(originalAbsolute);
+      await fs.mkdir(path.dirname(originalAbsolute), { recursive: true });
       await fs.copyFile(inputPath, originalAbsolute);
       await createThumbnail(originalAbsolute, thumbAbsolute);
 
