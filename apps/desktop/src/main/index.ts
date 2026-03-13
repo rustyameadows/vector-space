@@ -136,18 +136,55 @@ const seedDemoData = async (): Promise<{
   const outputDir = path.join(app.getPath('temp'), 'vector-space-demo-seed');
   await fs.mkdir(outputDir, { recursive: true });
 
-  const specs = [
-    { label: 'Beach', width: 1280, height: 720, color: '#4a90e2' },
-    { label: 'Forest', width: 1280, height: 720, color: '#2e7d32' },
-    { label: 'Sunset', width: 1080, height: 1080, color: '#ff7043' },
-    { label: 'Night', width: 1200, height: 800, color: '#3949ab' },
-    { label: 'City', width: 1440, height: 900, color: '#546e7a' },
-    { label: 'Portrait', width: 800, height: 1200, color: '#8d6e63' }
+  const palettes = [
+    '#ef4444',
+    '#f97316',
+    '#eab308',
+    '#84cc16',
+    '#22c55e',
+    '#14b8a6',
+    '#06b6d4',
+    '#3b82f6',
+    '#6366f1',
+    '#8b5cf6',
+    '#d946ef',
+    '#ec4899'
   ];
+  const labels = [
+    'Coral',
+    'Amber',
+    'Lime',
+    'Emerald',
+    'Teal',
+    'Cyan',
+    'Sky',
+    'Indigo',
+    'Violet',
+    'Magenta'
+  ];
+  const dimensions = [
+    [1024, 1024],
+    [1280, 720],
+    [1440, 900],
+    [1080, 1080],
+    [1200, 800],
+    [800, 1200]
+  ] as const;
+
+  const specs = Array.from({ length: 60 }, (_, index) => {
+    const [width, height] = dimensions[index % dimensions.length];
+    const color = palettes[index % palettes.length];
+    const label = `${labels[index % labels.length]} ${String(index + 1).padStart(2, '0')}`;
+
+    return { label, width, height, color };
+  });
 
   const paths = await Promise.all(
     specs.map(async (spec, index) => {
-      const filePath = path.join(outputDir, `demo-${index + 1}-${spec.label.toLowerCase()}.png`);
+      const filePath = path.join(
+        outputDir,
+        `demo-${index + 1}-${spec.label.toLowerCase().replace(/\s+/g, '-')}.png`
+      );
       await fs.writeFile(
         filePath,
         createSeedImagePng(spec.label, spec.width, spec.height, spec.color)
