@@ -37,6 +37,25 @@ const createThumbnail = async (sourcePath: string, outputPath: string): Promise<
   await fs.writeFile(outputPath, thumb.toPNG());
 };
 
+const deriveTitleFromPath = (inputPath: string): string =>
+  path
+    .basename(inputPath, path.extname(inputPath))
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const deriveLayoutHint = (width: number, height: number): string => {
+  const ratio = width / Math.max(height, 1);
+  if (ratio >= 1.45) return 'hero-first wide layout';
+  if (ratio <= 0.85) return 'editorial vertical layout';
+  return 'balanced grid layout';
+};
+
+const createRetrievalCaption = (title: string, width: number, height: number, mime: string): string => {
+  const layout = deriveLayoutHint(width, height);
+  return `${title || 'Untitled capture'}. ${layout}. ${mime.replace('image/', '')} inspiration asset.`;
+};
+
 export class ImportService {
   public constructor(private readonly db: VectorSpaceDb) {}
 
@@ -90,7 +109,20 @@ export class ImportService {
         sourcePath: inputPath
       };
 
-      this.db.insertAsset(asset, originalAbsolute, sourceStat.size, thumbAbsolute);
+      const title = deriveTitleFromPath(inputPath);
+      const retrievalCaption = createRetrievalCaption(title, size.width, size.height, asset.mime);
+
+      this.db.insertAsset(asset, originalAbsolute, sourceStat.size, thumbAbsolute, {
+        title,
+        userNote: '',
+        retrievalCaption,
+        metadataJson: JSON.stringify({
+          sourceType: 'image',
+          aspectRatio: Number((size.width / Math.max(size.height, 1)).toFixed(3)),
+          layoutType: deriveLayoutHint(size.width, size.height),
+          embeddingVersion: 'gemini-embedding-001/p3-e2-o2'
+        })
+      });
       imported += 1;
     }
 

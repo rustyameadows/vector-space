@@ -1,0 +1,48 @@
+{
+  "generatedAt": "2026-03-13T21:43:14.706Z",
+  "scenarios": [
+    {
+      "name": "Similarity mode (image-like query)",
+      "query": "visual=[1,0,0], joint=[1,0,0]",
+      "results": [
+        {
+          "assetId": "dashboard-1",
+          "score": 0.6796682790398023,
+          "reasons": [
+            "visual similarity",
+            "joint similarity"
+          ]
+        },
+        {
+          "assetId": "editorial-1",
+          "score": 0.041708480138171446,
+          "reasons": [
+            "metadata match"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Exploration mode (text query)",
+      "query": "\"serif editorial portfolio\"",
+      "results": [
+        {
+          "assetId": "editorial-1",
+          "score": 0.8126901704618985,
+          "reasons": [
+            "text similarity",
+            "joint similarity",
+            "lexical/OCR-style text match"
+          ]
+        },
+        {
+          "assetId": "dashboard-1",
+          "score": 0.06310983846407478,
+          "reasons": [
+            "metadata match"
+          ]
+        }
+      ]
+    }
+  ]
+}
