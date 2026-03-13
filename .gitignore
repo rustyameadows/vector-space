@@ -1,2 +1,4 @@
 node_modules
 apps/desktop/dist
+
+apps/desktop/release
