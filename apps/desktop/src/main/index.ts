@@ -74,6 +74,31 @@ const showStartupErrorAndExit = async (message: string): Promise<void> => {
   app.quit();
 };
 
+const getImportedAssetIds = (): string[] =>
+  db
+    .listAssets()
+    .filter((asset) => asset.status === 'imported')
+    .map((asset) => asset.id);
+
+const enqueueImportedAssets = (assetIds: string[]): void => {
+  if (!online || !embeddingProvider || assetIds.length === 0) {
+    return;
+  }
+
+  indexingService.enqueue(assetIds);
+};
+
+const importAndMaybeEnqueue = async (
+  inputPaths: string[],
+  source: 'file-picker' | 'folder' | 'clipboard'
+): Promise<{ imported: number; skipped: number }> => {
+  const importedBefore = new Set(getImportedAssetIds());
+  const result = await importService.importPaths(inputPaths, source);
+  const newlyImported = getImportedAssetIds().filter((assetId) => !importedBefore.has(assetId));
+  enqueueImportedAssets(newlyImported);
+  return result;
+};
+
 const registerIpc = (): void => {
   ipcMain.handle('library:list-assets', () => db.listAssets());
   ipcMain.handle('library:list-jobs', () => db.listIndexJobs());
@@ -101,22 +126,12 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle('library:import-files', async (_event, filePaths: string[]) => {
-    const result = await importService.importPaths(filePaths, 'file-picker');
-    const importedAssets = db
-      .listAssets()
-      .filter((asset) => asset.status === 'imported')
-      .map((asset) => asset.id);
-
-    if (online && importedAssets.length > 0) {
-      indexingService.enqueue(importedAssets);
-    }
-
-    return result;
+    return importAndMaybeEnqueue(filePaths, 'file-picker');
   });
 
   ipcMain.handle('library:import-folder', async (_event, folderPath: string) => {
     const imagePaths = await importService.collectFolderImages(folderPath);
-    return importService.importPaths(imagePaths, 'folder');
+    return importAndMaybeEnqueue(imagePaths, 'folder');
   });
 
   ipcMain.handle('library:import-clipboard', async () => {
@@ -127,7 +142,7 @@ const registerIpc = (): void => {
 
     const tempPath = path.join(app.getPath('temp'), `vs-clip-${Date.now()}.png`);
     await fs.writeFile(tempPath, image.toPNG());
-    return importService.importPaths([tempPath], 'clipboard');
+    return importAndMaybeEnqueue([tempPath], 'clipboard');
   });
 
   ipcMain.handle('library:open-file-dialog', async () => {
