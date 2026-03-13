@@ -9,6 +9,7 @@ const api = {
   importFiles: (paths: string[]) => ipcRenderer.invoke('library:import-files', paths),
   importFolder: (folderPath: string) => ipcRenderer.invoke('library:import-folder', folderPath),
   importClipboard: () => ipcRenderer.invoke('library:import-clipboard'),
+  seedDemoData: () => ipcRenderer.invoke('library:seed-demo-data'),
   openFileDialog: () => ipcRenderer.invoke('library:open-file-dialog'),
   openFolderDialog: () => ipcRenderer.invoke('library:open-folder-dialog'),
   createCollection: (name: string) => ipcRenderer.invoke('library:create-collection', name),

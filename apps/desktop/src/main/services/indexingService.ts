@@ -5,6 +5,8 @@ import type { EmbeddingProvider } from '../embedding/provider';
 export class IndexingService {
   private queue: string[] = [];
 
+  private queuedIds = new Set<string>();
+
   private processing = false;
 
   private paused = false;
@@ -15,7 +17,15 @@ export class IndexingService {
   ) {}
 
   public enqueue(assetIds: string[]): void {
-    assetIds.forEach((id) => this.queue.push(id));
+    assetIds.forEach((id) => {
+      if (this.queuedIds.has(id)) {
+        return;
+      }
+
+      this.queue.push(id);
+      this.queuedIds.add(id);
+    });
+
     void this.process();
   }
 
@@ -43,6 +53,7 @@ export class IndexingService {
     while (this.queue.length > 0 && !this.paused) {
       const assetId = this.queue.shift();
       if (!assetId) continue;
+      this.queuedIds.delete(assetId);
 
       const asset = this.db.listAssets().find((entry) => entry.id === assetId);
       if (!asset) continue;
