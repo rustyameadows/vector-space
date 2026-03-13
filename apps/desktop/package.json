@@ -7,7 +7,7 @@
     "dev": "concurrently -k -n RENDERER,MAIN,ELECTRON \"npm run dev:renderer\" \"npm run dev:main\" \"npm run dev:electron\"",
     "dev:renderer": "vite",
     "dev:main": "tsc -p tsconfig.main.json --watch --preserveWatchOutput",
-    "dev:electron": "cross-env VITE_DEV_SERVER_URL=http://localhost:5173 wait-on tcp:5173 dist/main/index.js && electronmon dist/main/index.js",
+    "dev:electron": "cross-env-shell VITE_DEV_SERVER_URL=http://localhost:5173 \"wait-on tcp:5173 dist/main/index.js && electronmon dist/main/index.js\"",
     "build": "npm run build:main && npm run build:renderer",
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
