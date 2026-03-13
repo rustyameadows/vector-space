@@ -1,5 +1,6 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, dialog } from 'electron';
 import path from 'node:path';
+import { initializeLibraryPathing, LibraryPathError } from './library/pathManager';
 
 const createWindow = (): void => {
   const window = new BrowserWindow({
@@ -27,7 +28,34 @@ const createWindow = (): void => {
   });
 };
 
-app.whenReady().then(() => {
+const showStartupErrorAndExit = async (message: string): Promise<void> => {
+  await dialog.showMessageBox({
+    type: 'error',
+    title: 'Vector Space',
+    message: 'Unable to initialize local library',
+    detail: message
+  });
+
+  app.quit();
+};
+
+app.whenReady().then(async () => {
+  try {
+    const libraryPaths = await initializeLibraryPathing();
+    console.log('Library paths ready', libraryPaths);
+  } catch (error: unknown) {
+    if (error instanceof LibraryPathError) {
+      await showStartupErrorAndExit(error.userMessage);
+      return;
+    }
+
+    console.error('Unexpected startup error while initializing library paths', error);
+    await showStartupErrorAndExit(
+      'Vector Space could not initialize local storage. Please restart the app and try again.'
+    );
+    return;
+  }
+
   createWindow();
 
   app.on('activate', () => {
