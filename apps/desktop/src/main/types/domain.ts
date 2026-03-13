@@ -1,5 +1,9 @@
 export type AssetStatus = 'imported' | 'indexing' | 'ready' | 'failed';
 
+export type EmbeddingRole = 'joint' | 'visual' | 'text' | 'chunk';
+
+export type SearchMode = 'similarity' | 'exploration';
+
 export interface AssetRecord {
   id: string;
   createdAt: string;
@@ -14,8 +18,8 @@ export interface AssetRecord {
 
 export interface SearchFilters {
   mimePrefix?: string;
-  collectionId?: string;
-  tagIds?: string[];
+  collectionName?: string;
+  tagNames?: string[];
   onlyOfflineReady?: boolean;
 }
 
@@ -36,4 +40,17 @@ export interface AppAssetView {
   originalPath: string;
   tags: string[];
   collections: string[];
+  retrievalCaption: string;
+}
+
+export interface EmbeddingRecord {
+  assetId: string;
+  role: EmbeddingRole;
+  vector: number[];
+  taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY';
+  model: string;
+  dimension: number;
+  preprocessingVersion: number;
+  extractionVersion: number;
+  ocrVersion: number;
 }

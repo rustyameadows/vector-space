@@ -46,9 +46,11 @@ npm run package:mac --workspace @vector-space/desktop
 - SHA-256 duplicate detection and metadata persistence in SQLite.
 - Thumbnail generation and fast renderer grid browsing.
 - Background indexing queue with pause/resume/reindex controls.
-- Embedding provider abstraction using Gemini Embedding API.
-- Local vector retrieval for semantic and similar-image search.
-- Filtering, match-reason explanations, collection + tag organization.
+- Gemini multimodal embedding pipeline with role-specific vectors (`visual`, `text`, `joint`).
+- Query/document task-type split for higher quality retrieval (`RETRIEVAL_DOCUMENT` vs `RETRIEVAL_QUERY`).
+- Hybrid retrieval blending vector similarity with lexical matching and metadata filters.
+- Chunked text sidecar storage for better long-text and OCR-oriented recall.
+- Embedding schema version metadata to enable safe re-indexing over time.
 - Offline mode toggle preserving local browse and retrieval behavior.
 
 ## Quality checks

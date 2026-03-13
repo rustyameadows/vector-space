@@ -1,9 +1,20 @@
+export type GeminiTaskType = 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY';
+
+export interface EmbedRequest {
+  taskType: GeminiTaskType;
+  textParts?: string[];
+  imageBuffer?: Buffer;
+  outputDimensionality?: number;
+}
+
 export interface EmbeddingProvider {
   readonly name: string;
   readonly model: string;
-  readonly version: string;
-  embedText(input: string): Promise<number[]>;
-  embedImage(buffer: Buffer): Promise<number[]>;
+  readonly preprocessingVersion: number;
+  readonly extractionVersion: number;
+  readonly ocrVersion: number;
+  readonly outputDimensionality: number;
+  embed(request: EmbedRequest): Promise<number[]>;
 }
 
 interface GeminiApiResponse {
@@ -26,24 +37,60 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
 
   public readonly model: string;
 
-  public readonly version = 'v1';
+  public readonly preprocessingVersion: number;
+
+  public readonly extractionVersion: number;
+
+  public readonly ocrVersion: number;
+
+  public readonly outputDimensionality: number;
 
   private readonly apiKey: string;
 
-  public constructor(config: { apiKey: string; model?: string }) {
+  public constructor(
+    config: {
+      apiKey: string;
+      model?: string;
+      preprocessingVersion?: number;
+      extractionVersion?: number;
+      ocrVersion?: number;
+      outputDimensionality?: number;
+    }
+  ) {
     this.apiKey = config.apiKey.trim();
     this.model = config.model ?? 'gemini-embedding-001';
+    this.preprocessingVersion = config.preprocessingVersion ?? 3;
+    this.extractionVersion = config.extractionVersion ?? 2;
+    this.ocrVersion = config.ocrVersion ?? 2;
+    this.outputDimensionality = config.outputDimensionality ?? 3072;
   }
 
-  public async embedText(input: string): Promise<number[]> {
-    return this.embedContent({ text: input });
-  }
+  public async embed(request: EmbedRequest): Promise<number[]> {
+    if ((!request.textParts || request.textParts.length === 0) && !request.imageBuffer) {
+      throw new Error('Embedding request requires textParts and/or imageBuffer');
+    }
 
-  public async embedImage(buffer: Buffer): Promise<number[]> {
-    return this.embedContent({ inlineData: { mimeType: 'image/png', data: buffer.toString('base64') } });
-  }
+    const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [];
+    if (request.imageBuffer) {
+      parts.push({
+        inlineData: {
+          mimeType: 'image/png',
+          data: request.imageBuffer.toString('base64')
+        }
+      });
+    }
 
-  private async embedContent(part: { text?: string; inlineData?: { mimeType: string; data: string } }): Promise<number[]> {
+    for (const text of request.textParts ?? []) {
+      const normalized = text.trim();
+      if (normalized) {
+        parts.push({ text: normalized });
+      }
+    }
+
+    if (parts.length === 0) {
+      throw new Error('Embedding request has no valid parts after normalization');
+    }
+
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:embedContent`;
     const response = await fetch(`${endpoint}?key=${this.apiKey}`, {
       method: 'POST',
@@ -52,8 +99,10 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
       },
       body: JSON.stringify({
         model: `models/${this.model}`,
+        taskType: request.taskType,
+        outputDimensionality: request.outputDimensionality ?? this.outputDimensionality,
         content: {
-          parts: [part]
+          parts
         }
       })
     });
