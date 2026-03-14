@@ -644,7 +644,9 @@ export const App = () => {
                 onClick={() => setSelectedAssetId(asset.id)}
                 onDoubleClick={() => openAssetViewer(asset.id)}
               >
-                {imageSrc ? <img src={imageSrc} alt={asset.id} /> : <div className="placeholder" />}
+                <div className="card-media">
+                  {imageSrc ? <img src={imageSrc} alt={asset.id} /> : <div className="placeholder" />}
+                </div>
                 <div className="card-meta">
                   <strong className="asset-name">{formatAssetLabel(asset)}</strong>
                   <p className="asset-dimensions">
