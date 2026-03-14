@@ -86,7 +86,7 @@ npm run package:mac --workspace @vector-space/desktop -- --arch=x64
 - SHA-256 duplicate detection and metadata persistence in SQLite.
 - Thumbnail generation and fast renderer grid browsing.
 - Startup thumbnail maintenance that repairs legacy stretched grid previews in the background.
-- Single-asset viewer overlay with double-click entry, detail-panel CTA, and keyboard navigation.
+- Adjustable `2` to `10` up library grid with a `6` up default, hover-revealed card metadata, and a single-asset viewer overlay opened from the grid.
 - Background indexing queue with pause/resume/reindex controls.
 - Gemini embedding pipeline pinned to `gemini-embedding-2-preview` with role-specific vectors (`visual`, `text`, `joint`).
 - Query/document task-type split for higher quality retrieval (`RETRIEVAL_DOCUMENT` vs `RETRIEVAL_QUERY`).

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { GEMINI_EMBEDDING_MODEL, getGeminiApiSettings } from '../shared/gemini';
 import {
   getAdjacentViewerAssetId,
@@ -7,6 +7,13 @@ import {
   viewerAssetStillVisible
 } from './assetViewer';
 import { buildLibraryAssetUrl, buildThumbnailSrc } from './assetUrls';
+import {
+  clampGridColumns,
+  DEFAULT_GRID_COLUMNS,
+  formatGridColumnsLabel,
+  MAX_GRID_COLUMNS,
+  MIN_GRID_COLUMNS
+} from './gridControls';
 
 type Asset = {
   id: string;
@@ -238,6 +245,7 @@ export const App = () => {
   const [showJobs, setShowJobs] = useState(false);
   const [viewerAssetId, setViewerAssetId] = useState<string | null>(null);
   const [apiModel, setApiModel] = useState<string>(GEMINI_EMBEDDING_MODEL);
+  const [gridColumns, setGridColumns] = useState(DEFAULT_GRID_COLUMNS);
 
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedAssetId) ?? null,
@@ -489,6 +497,18 @@ export const App = () => {
         ? `Queue idle · ${failedJobCount} failed`
         : 'Queue idle';
 
+  const gridStyle = useMemo(
+    () =>
+      ({
+        gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`
+      }) as CSSProperties,
+    [gridColumns]
+  );
+
+  const handleGridColumnsChange = (value: string) => {
+    setGridColumns(clampGridColumns(Number(value)));
+  };
+
   const getAssetImageSrc = (asset: Asset) => {
     return buildThumbnailSrc(asset);
   };
@@ -627,11 +647,34 @@ export const App = () => {
           <button onClick={runSearch} disabled={busy || !hasApiKey}>
             Search
           </button>
+          <label className="grid-size-control" htmlFor="grid-size-slider">
+            <span>Grid</span>
+            <input
+              id="grid-size-slider"
+              className="grid-size-slider"
+              type="range"
+              min={MIN_GRID_COLUMNS}
+              max={MAX_GRID_COLUMNS}
+              step={1}
+              value={gridColumns}
+              onInput={(event) => handleGridColumnsChange(event.currentTarget.value)}
+              onChange={(event) => handleGridColumnsChange(event.target.value)}
+              aria-label="Grid columns"
+            />
+            <output htmlFor="grid-size-slider">{formatGridColumnsLabel(gridColumns)}</output>
+          </label>
         </div>
       </section>
 
       <section className="content">
-        <section className="grid">
+        <section className="grid" style={gridStyle}>
+          {filteredAssets.length === 0 ? (
+            <div className="grid-empty">
+              <strong>No assets to show.</strong>
+              <p>Import files or loosen the current search and mime filters.</p>
+            </div>
+          ) : null}
+
           {filteredAssets.map((asset) => {
             const imageSrc = getAssetImageSrc(asset);
             return (
@@ -640,64 +683,52 @@ export const App = () => {
                 className={`card ${selectedAssetId === asset.id ? 'card-selected' : ''}`}
                 onClick={() => setSelectedAssetId(asset.id)}
                 onDoubleClick={() => openAssetViewer(asset.id)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    openAssetViewer(asset.id);
+                    return;
+                  }
+
+                  if (event.key === ' ') {
+                    event.preventDefault();
+                    setSelectedAssetId(asset.id);
+                  }
+                }}
+                tabIndex={0}
               >
                 <div className="card-media">
                   {imageSrc ? <img src={imageSrc} alt={asset.id} /> : <div className="placeholder" />}
                 </div>
                 <div className="card-meta">
-                  <strong className="asset-name">{formatAssetLabel(asset)}</strong>
-                  <p className="asset-dimensions">
-                    <span className="asset-badge">{asset.mime.split('/')[0]}</span>
-                    {asset.width}×{asset.height} ·{' '}
-                    <span className={`status-pill status-${asset.status}`}>
-                      {statusLabel[asset.status]}
-                    </span>
-                  </p>
-                  {searchResults[asset.id] ? (
-                    <p className="reason">Why: {searchResults[asset.id]?.reasons.join(', ')}</p>
-                  ) : null}
+                  <div className="card-meta-copy">
+                    <strong className="asset-name">{formatAssetLabel(asset)}</strong>
+                    <p className="asset-dimensions">
+                      <span className="asset-badge">{asset.mime.split('/')[0]}</span>
+                      <span>{asset.width}×{asset.height} ·</span>
+                      <span className={`status-pill status-${asset.status}`}>
+                        {statusLabel[asset.status]}
+                      </span>
+                    </p>
+                    {searchResults[asset.id] ? (
+                      <p className="reason">Why: {searchResults[asset.id]?.reasons.join(', ')}</p>
+                    ) : null}
+                  </div>
+                  <button
+                    className="card-view-button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openAssetViewer(asset.id);
+                    }}
+                    disabled={busy}
+                  >
+                    View
+                  </button>
                 </div>
               </article>
             );
           })}
         </section>
-
-        <aside className="panel side-panel detail-panel">
-          <h3>Asset Detail</h3>
-          {selectedAsset ? (
-            <>
-              <div className="detail-preview">
-                {getAssetImageSrc(selectedAsset) ? (
-                  <img src={getAssetImageSrc(selectedAsset) ?? ''} alt={selectedAsset.id} />
-                ) : (
-                  <div className="placeholder" />
-                )}
-              </div>
-              <p className="detail-name">{formatAssetLabel(selectedAsset)}</p>
-              <p>
-                Status:{' '}
-                <span className={`status-pill status-${selectedAsset.status}`}>
-                  {statusLabel[selectedAsset.status]}
-                </span>
-              </p>
-              <p>{selectedAsset.mime}</p>
-              <p>
-                {selectedAsset.width}×{selectedAsset.height} · Imported {formatCreatedAt(selectedAsset.createdAt)}
-              </p>
-              <p>Tags: {selectedAsset.tags.join(', ') || 'none'}</p>
-              <p>Collections: {selectedAsset.collections.join(', ') || 'none'}</p>
-
-              <div className="detail-actions">
-                <button onClick={() => openAssetViewer(selectedAsset.id)} disabled={busy}>
-                  View Asset
-                </button>
-              </div>
-              <p className="detail-hint">Double-click any asset card to enter the full viewer.</p>
-            </>
-          ) : (
-            <p>Select an asset card.</p>
-          )}
-        </aside>
       </section>
 
       {viewerAsset ? (
