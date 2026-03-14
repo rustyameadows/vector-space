@@ -2,3 +2,8 @@ node_modules
 apps/desktop/dist
 
 apps/desktop/release
+apps/desktop/.electron-cache
+apps/desktop/.electron-rebuild-home
+apps/desktop/artifacts
+docs/artifacts
+output
