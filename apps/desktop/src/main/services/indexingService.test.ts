@@ -28,6 +28,8 @@ class FakeDb {
 
   public readonly derivedUpdates: Array<{ assetId: string; retrievalCaption: string }> = [];
 
+  public readonly suggestionWrites: Array<{ assetId: string; values: string[] }> = [];
+
   public listAssets(): AppAssetView[] {
     return Array.from(this.assets.values()).map((asset) => ({
       ...asset
@@ -61,7 +63,15 @@ class FakeDb {
 
   public upsertAssetEnrichment(
     assetId: string,
-    enrichment: { hasText: boolean; orientation: string; aspectBucket: string }
+    enrichment: {
+      hasText: boolean;
+      orientation: string;
+      aspectBucket: string;
+      ocrText?: string;
+      ocrLines?: string[];
+      ocrRotation?: 0 | 90 | 180 | 270;
+      pathTokens?: string[];
+    }
   ): void {
     this.enrichmentWrites.push({ assetId, hasText: enrichment.hasText });
     const asset = this.assets.get(assetId);
@@ -72,6 +82,16 @@ class FakeDb {
     asset.hasText = enrichment.hasText;
     asset.orientation = enrichment.orientation as AssetDetailView['orientation'];
     asset.aspectBucket = enrichment.aspectBucket as AssetDetailView['aspectBucket'];
+    asset.enrichment = {
+      ...asset.enrichment,
+      ocrText: enrichment.ocrText ?? '',
+      ocrLines: enrichment.ocrLines ?? [],
+      ocrRotation: enrichment.ocrRotation ?? 0,
+      pathTokens: enrichment.pathTokens ?? [],
+      hasText: enrichment.hasText,
+      orientation: enrichment.orientation as AssetDetailView['orientation'],
+      aspectBucket: enrichment.aspectBucket as AssetDetailView['aspectBucket']
+    };
   }
 
   public updateAssetDerivedFields(
@@ -90,6 +110,45 @@ class FakeDb {
 
   public upsertEmbedding(record: { assetId: string; role: string; model: string }): void {
     this.embeddings.push(record);
+  }
+
+  public listAssetsForSearch() {
+    return Array.from(this.assets.values()).map((asset) => ({
+      assetId: asset.id,
+      title: asset.title,
+      userNote: asset.userNote,
+      retrievalCaption: asset.retrievalCaption,
+      tags: asset.tags,
+      collections: asset.collections,
+      status: asset.status,
+      mime: asset.mime,
+      createdAt: asset.createdAt,
+      dominantColors: asset.dominantColors,
+      orientation: asset.orientation,
+      aspectBucket: asset.aspectBucket,
+      hasText: asset.hasText,
+      ocrText: asset.enrichment.ocrText,
+      pathTokens: asset.enrichment.pathTokens
+    }));
+  }
+
+  public listEmbeddings(role: string) {
+    return this.embeddings
+      .filter((entry) => entry.role === role)
+      .map((entry, index) => ({
+        assetId: entry.assetId,
+        vector: [index + 1, index + 2, index + 3]
+      }));
+  }
+
+  public replaceTagSuggestions(
+    assetId: string,
+    suggestions: Array<{ value: string }>
+  ): void {
+    this.suggestionWrites.push({
+      assetId,
+      values: suggestions.map((suggestion) => suggestion.value)
+    });
   }
 }
 
@@ -134,8 +193,13 @@ describe('IndexingService', () => {
       searchDocumentSections: [],
       tagEntries: [],
       collectionEntries: [],
+      suggestedTags: [],
+      fileSizeBytes: 2048,
       enrichment: {
         ocrText: '',
+        ocrLines: [],
+        ocrRotation: 0,
+        pathTokens: [],
         dominantColors: [],
         orientation: 'square',
         aspectBucket: 'square',
@@ -160,6 +224,9 @@ describe('IndexingService', () => {
       {
         extract: vi.fn().mockResolvedValue({
           ocrText: 'Retry target',
+          ocrLines: ['Retry target'],
+          ocrRotation: 0,
+          pathTokens: ['retry', 'target'],
           dominantColors: ['blue'],
           orientation: 'square',
           aspectBucket: 'square',
@@ -178,7 +245,7 @@ describe('IndexingService', () => {
     expect(service.getLiveJobs()).toEqual([
       expect.objectContaining({
         assetId: 'asset-failed',
-        stage: 'embedding',
+        stage: 'enrichment',
         status: 'queued'
       })
     ]);
@@ -190,11 +257,22 @@ describe('IndexingService', () => {
     });
 
     expect(service.getLiveJobs()).toEqual([]);
-    expect(db.jobs.map((job) => job.status)).toEqual(['running', 'success']);
+    expect(
+      db.jobs.map((job) => ({
+        stage: job.stage,
+        status: job.status
+      }))
+    ).toEqual([
+      { stage: 'enrichment', status: 'running' },
+      { stage: 'enrichment', status: 'success' },
+      { stage: 'embedding', status: 'running' },
+      { stage: 'embedding', status: 'success' }
+    ]);
     expect(db.embeddings).toHaveLength(3);
     expect(db.textChunkWrites[0]?.assetId).toBe('asset-failed');
     expect(db.textChunkWrites[0]?.chunkCount).toBeGreaterThan(1);
     expect(db.enrichmentWrites).toEqual([{ assetId: 'asset-failed', hasText: true }]);
+    expect(db.suggestionWrites[0]?.values).toContain('retry');
     expect(db.derivedUpdates[0]?.retrievalCaption).toContain('Contains readable text');
   });
 });

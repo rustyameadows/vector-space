@@ -29,8 +29,15 @@ const api = {
     ipcRenderer.invoke('library:batch-assign-tags', { assetIds, tagId }),
   batchAssignCollections: (assetIds: string[], collectionId: string) =>
     ipcRenderer.invoke('library:batch-assign-collections', { assetIds, collectionId }),
+  batchAcceptSuggestedTags: (assetIds: string[]) =>
+    ipcRenderer.invoke('library:batch-accept-suggested-tags', assetIds),
   updateAssetMetadata: (assetId: string, payload: { title: string; userNote: string }) =>
     ipcRenderer.invoke('library:update-asset-metadata', { assetId, ...payload }),
+  rerunEnrichment: (assetIds: string[]) => ipcRenderer.invoke('library:rerun-enrichment', assetIds),
+  acceptSuggestedTags: (assetId: string, values: string[]) =>
+    ipcRenderer.invoke('library:accept-suggested-tags', { assetId, values }),
+  rejectSuggestedTags: (assetId: string, values: string[]) =>
+    ipcRenderer.invoke('library:reject-suggested-tags', { assetId, values }),
   pauseIndexing: () => ipcRenderer.invoke('library:pause-indexing'),
   resumeIndexing: () => ipcRenderer.invoke('library:resume-indexing'),
   reindex: () => ipcRenderer.invoke('library:reindex'),
@@ -39,6 +46,8 @@ const api = {
     ipcRenderer.invoke('library:search-text', { query, filters }),
   searchImage: (imagePath: string, text?: string, filters?: SearchFilters) =>
     ipcRenderer.invoke('library:search-image', { imagePath, text, filters }),
+  searchSimilarToAsset: (assetId: string, filters?: SearchFilters) =>
+    ipcRenderer.invoke('library:search-similar-to-asset', { assetId, filters }),
   saveSearch: (payload: SavedSearchPayload) => ipcRenderer.invoke('library:save-search', payload),
   deleteSavedSearch: (savedSearchId: string) =>
     ipcRenderer.invoke('library:delete-saved-search', savedSearchId),

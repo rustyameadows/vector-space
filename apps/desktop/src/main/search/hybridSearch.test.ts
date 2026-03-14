@@ -16,6 +16,8 @@ interface FakeAsset {
   orientation: 'portrait' | 'landscape' | 'square';
   aspectBucket: 'wide' | 'portrait' | 'square' | 'standard' | 'tall' | 'ultrawide';
   hasText: boolean;
+  ocrText: string;
+  pathTokens: string[];
 }
 
 class FakeDb {
@@ -55,7 +57,9 @@ const assets: FakeAsset[] = [
     dominantColors: ['blue'],
     orientation: 'landscape',
     aspectBucket: 'wide',
-    hasText: true
+    hasText: true,
+    ocrText: 'analytics metrics dashboard text',
+    pathTokens: ['product', 'dashboard']
   },
   {
     assetId: 'editorial-1',
@@ -70,7 +74,9 @@ const assets: FakeAsset[] = [
     dominantColors: ['gray'],
     orientation: 'portrait',
     aspectBucket: 'portrait',
-    hasText: false
+    hasText: false,
+    ocrText: '',
+    pathTokens: ['editorial', 'portfolio']
   },
   {
     assetId: 'not-ready',
@@ -85,7 +91,9 @@ const assets: FakeAsset[] = [
     dominantColors: ['blue'],
     orientation: 'landscape',
     aspectBucket: 'wide',
-    hasText: false
+    hasText: false,
+    ocrText: '',
+    pathTokens: ['draft']
   }
 ];
 
@@ -143,7 +151,7 @@ describe('HybridSearchService', () => {
     });
 
     expect(results[0]?.assetId).toBe('editorial-1');
-    expect(results[0]?.reasons).toContain('lexical/OCR-style text match');
+    expect(results[0]?.reasons).toContain('search document match');
     expect(results[0]?.explanation.matchedFields).toContain('title');
   });
 
@@ -181,5 +189,6 @@ describe('HybridSearchService', () => {
     expect(results).toHaveLength(1);
     expect(results[0]?.assetId).toBe('dashboard-1');
     expect(results[0]?.reasons).toContain('matching color filter');
+    expect(results[0]?.explanation.matchedOcrTerms).toContain('text');
   });
 });

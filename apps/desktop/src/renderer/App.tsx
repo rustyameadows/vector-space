@@ -8,7 +8,8 @@ import type {
   SavedSearchView,
   SearchExplanation,
   SearchFilters,
-  SearchResult
+  SearchResult,
+  SuggestedTagView
 } from '../shared/contracts';
 import { formatColorFamilyLabel, formatImportSourceLabel } from '../shared/assetMetadata';
 import { GEMINI_EMBEDDING_MODEL, getGeminiApiSettings } from '../shared/gemini';
@@ -120,6 +121,38 @@ const formatCreatedAt = (isoTimestamp: string) => {
   });
 };
 
+const formatFileSize = (size: number) => {
+  if (!size) {
+    return 'Unknown file size';
+  }
+
+  if (size < 1024) {
+    return `${size} B`;
+  }
+
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const formatOcrRotation = (rotation: 0 | 90 | 180 | 270) =>
+  rotation === 0 ? 'upright' : `${rotation}° corrected`;
+
+const formatSuggestionSource = (source: SuggestedTagView['source']) => {
+  switch (source) {
+    case 'ocr':
+      return 'OCR';
+    case 'path':
+      return 'Path';
+    case 'neighbor':
+      return 'Similar asset';
+    default:
+      return 'Metadata';
+  }
+};
+
 const previewPalettes = [
   '#f97316',
   '#22c55e',
@@ -145,9 +178,11 @@ const buildPreviewExplanation = (assetId: string): SearchExplanation => ({
   lexicalScore: assetId.endsWith('1') ? 0.28 : 0.14,
   metadataScore: 0.22,
   recencyBoost: 0.02,
-  matchedFields: ['title', 'search document'],
+  matchedFields: ['title', 'ocr', 'search document'],
   matchedTerms: ['dashboard', 'editorial'],
   matchedTags: ['demo'],
+  matchedOcrTerms: ['dashboard'],
+  matchedPathTerms: ['editorial'],
   matchedCollections: ['showcase'],
   matchedColors: ['blue'],
   snippet: 'Demo snippet showing how the search document and metadata will surface in the UI.'
@@ -213,6 +248,7 @@ const createPreviewApi = (): VectorSpaceApi => {
         ...asset,
         checksum: asset.id,
         sourcePath: asset.originalPath,
+        fileSizeBytes: 512_000,
         metadata: {
           sourceType: 'preview',
           aspectRatio: Number((asset.width / asset.height).toFixed(3))
@@ -228,8 +264,37 @@ const createPreviewApi = (): VectorSpaceApi => {
         collectionEntries: asset.collections.map(
           (name) => collections.find((collection) => collection.name === name) ?? { id: name, name }
         ),
+        suggestedTags: asset.hasText
+          ? [
+              {
+                value: 'typography',
+                source: 'ocr',
+                confidence: 0.88,
+                status: 'pending',
+                updatedAt: asset.createdAt
+              },
+              {
+                value: 'showcase',
+                source: 'neighbor',
+                confidence: 0.74,
+                status: 'pending',
+                updatedAt: asset.createdAt
+              }
+            ]
+          : [
+              {
+                value: 'blue',
+                source: 'metadata',
+                confidence: 0.9,
+                status: 'pending',
+                updatedAt: asset.createdAt
+              }
+            ],
         enrichment: {
-          ocrText: asset.hasText ? 'Preview OCR text' : '',
+          ocrText: asset.hasText ? 'Preview OCR text\nHeadline treatment' : '',
+          ocrLines: asset.hasText ? ['Preview OCR text', 'Headline treatment'] : [],
+          ocrRotation: 0,
+          pathTokens: ['demo', 'preview', 'archive'],
           dominantColors: asset.dominantColors,
           orientation: asset.orientation,
           aspectBucket: asset.aspectBucket,
@@ -301,6 +366,7 @@ const createPreviewApi = (): VectorSpaceApi => {
     detachTag: async () => ({ ok: true }),
     batchAssignTags: async () => ({ ok: true }),
     batchAssignCollections: async () => ({ ok: true }),
+    batchAcceptSuggestedTags: async () => ({ ok: true, accepted: 0 }),
     updateAssetMetadata: async (assetId: string, payload: { title: string; userNote: string }) => {
       const detail = detailMap.get(assetId) ?? null;
       if (!detail) {
@@ -314,6 +380,33 @@ const createPreviewApi = (): VectorSpaceApi => {
         .trim();
       return detail;
     },
+    rerunEnrichment: async () => ({ ok: true }),
+    acceptSuggestedTags: async (assetId: string, values: string[]) => {
+      const detail = detailMap.get(assetId) ?? null;
+      if (!detail) {
+        return null;
+      }
+
+      const accepted = new Set(values);
+      detail.suggestedTags = detail.suggestedTags.map((suggestion) =>
+        accepted.has(suggestion.value) ? { ...suggestion, status: 'accepted' } : suggestion
+      );
+      detail.tags = Array.from(new Set([...detail.tags, ...values]));
+      detail.tagEntries = detail.tags.map((name) => ({ id: name, name }));
+      return detail;
+    },
+    rejectSuggestedTags: async (assetId: string, values: string[]) => {
+      const detail = detailMap.get(assetId) ?? null;
+      if (!detail) {
+        return null;
+      }
+
+      const rejected = new Set(values);
+      detail.suggestedTags = detail.suggestedTags.map((suggestion) =>
+        rejected.has(suggestion.value) ? { ...suggestion, status: 'rejected' } : suggestion
+      );
+      return detail;
+    },
     pauseIndexing: async () => ({ ok: true }),
     resumeIndexing: async () => ({ ok: true }),
     reindex: async () => ({ ok: true }),
@@ -322,7 +415,7 @@ const createPreviewApi = (): VectorSpaceApi => {
       demoAssets.slice(0, 8).map((asset, index) => ({
         assetId: asset.id,
         score: 0.94 - index * 0.04,
-        reasons: ['joint similarity', 'lexical/OCR-style text match', 'matching tags'],
+        reasons: ['joint similarity', 'OCR text match', 'accepted tag match'],
         explanation: buildPreviewExplanation(asset.id)
       })),
     searchImage: async () =>
@@ -330,6 +423,13 @@ const createPreviewApi = (): VectorSpaceApi => {
         assetId: asset.id,
         score: 0.98 - index * 0.05,
         reasons: ['visual similarity', 'matching color filter'],
+        explanation: buildPreviewExplanation(asset.id)
+      })),
+    searchSimilarToAsset: async () =>
+      demoAssets.slice(1, 9).map((asset, index) => ({
+        assetId: asset.id,
+        score: 0.99 - index * 0.05,
+        reasons: ['visual similarity', 'accepted tag match'],
         explanation: buildPreviewExplanation(asset.id)
       })),
     saveSearch: async (payload: SavedSearchPayload) => ({
@@ -370,6 +470,12 @@ const formatExplanationSummary = (explanation: SearchExplanation): string[] => {
   if (explanation.matchedTags.length > 0) {
     summary.push(`tags: ${explanation.matchedTags.join(', ')}`);
   }
+  if (explanation.matchedOcrTerms.length > 0) {
+    summary.push(`ocr: ${explanation.matchedOcrTerms.join(', ')}`);
+  }
+  if (explanation.matchedPathTerms.length > 0) {
+    summary.push(`path: ${explanation.matchedPathTerms.join(', ')}`);
+  }
   if (explanation.matchedCollections.length > 0) {
     summary.push(`collections: ${explanation.matchedCollections.join(', ')}`);
   }
@@ -389,6 +495,7 @@ export const App = () => {
   const [savedSearches, setSavedSearches] = useState<SavedSearchView[]>([]);
   const [search, setSearch] = useState('');
   const [searchMode, setSearchMode] = useState<'semantic' | 'similar-image'>('semantic');
+  const [similarSourceAssetId, setSimilarSourceAssetId] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<Record<string, SearchResult>>({});
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
@@ -409,6 +516,7 @@ export const App = () => {
   const [noteDraft, setNoteDraft] = useState('');
   const [viewerTagInput, setViewerTagInput] = useState('');
   const [viewerCollectionInput, setViewerCollectionInput] = useState('');
+  const [viewerSuggestedTagSelection, setViewerSuggestedTagSelection] = useState<string[]>([]);
   const [batchMode, setBatchMode] = useState<BatchMode>(null);
   const [batchTagInput, setBatchTagInput] = useState('');
   const [batchCollectionInput, setBatchCollectionInput] = useState('');
@@ -513,6 +621,10 @@ export const App = () => {
   }, [loadAssetDetail, viewerAssetId]);
 
   useEffect(() => {
+    setViewerSuggestedTagSelection([]);
+  }, [viewerDetail?.id]);
+
+  useEffect(() => {
     if (batchMode && batchBarRef.current) {
       batchBarRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
@@ -554,9 +666,15 @@ export const App = () => {
   };
 
   const executeSearch = useCallback(
-    async (query: string, nextMode: 'semantic' | 'similar-image', nextFilters: SearchFilters) => {
-      if (!query.trim()) {
+    async (
+      query: string,
+      nextMode: 'semantic' | 'similar-image',
+      nextFilters: SearchFilters,
+      similarAssetId?: string | null
+    ) => {
+      if (!query.trim() && !similarAssetId) {
         setSearchResults({});
+        setSimilarSourceAssetId(null);
         setMessage('Search cleared');
         return;
       }
@@ -564,7 +682,9 @@ export const App = () => {
       const rows =
         nextMode === 'semantic'
           ? await api.searchText(query, nextFilters)
-          : await api.searchImage(query, '', nextFilters);
+          : similarAssetId
+            ? await api.searchSimilarToAsset(similarAssetId, nextFilters)
+            : await api.searchImage(query, '', nextFilters);
 
       const mapped: Record<string, SearchResult> = {};
       rows.forEach((row) => {
@@ -572,22 +692,46 @@ export const App = () => {
       });
 
       setSearchResults(mapped);
-      setMessage(`Search returned ${rows.length} results`);
+      setSimilarSourceAssetId(nextMode === 'similar-image' && similarAssetId ? similarAssetId : null);
+      setMessage(
+        nextMode === 'similar-image' && similarAssetId
+          ? `Found ${rows.length} related images`
+          : `Search returned ${rows.length} results`
+      );
     },
     [api]
   );
 
+  const runFindSimilar = useCallback(
+    async (assetId: string, closeViewer = true) => {
+      const asset = assets.find((candidate) => candidate.id === assetId) ?? null;
+      if (!asset) {
+        return;
+      }
+
+      await runAction('Find similar', async () => {
+        setSearchMode('similar-image');
+        setSearch(asset.originalPath);
+        await executeSearch(asset.originalPath, 'similar-image', filters, assetId);
+        if (closeViewer) {
+          setViewerAssetId(null);
+        }
+      });
+    },
+    [assets, executeSearch, filters, runAction]
+  );
+
   const runSearch = async () => {
     await runAction('Search', async () => {
-      await executeSearch(search, searchMode, filters);
+      await executeSearch(search, searchMode, filters, similarSourceAssetId);
     });
   };
 
   const applyFilters = (nextFilters: SearchFilters) => {
     setFilters(nextFilters);
-    if (search.trim()) {
+    if (search.trim() || similarSourceAssetId) {
       void runAction('Search refresh', async () => {
-        await executeSearch(search, searchMode, nextFilters);
+        await executeSearch(search, searchMode, nextFilters, similarSourceAssetId);
       });
     }
   };
@@ -629,6 +773,18 @@ export const App = () => {
   const focusedAsset = useMemo(
     () => (focusedAssetId ? (assetMap.get(focusedAssetId) ?? null) : null),
     [assetMap, focusedAssetId]
+  );
+  const similarSourceAsset = useMemo(
+    () => (similarSourceAssetId ? (assetMap.get(similarSourceAssetId) ?? null) : null),
+    [assetMap, similarSourceAssetId]
+  );
+  const viewerPendingSuggestions = useMemo(
+    () => (viewerDetail?.suggestedTags ?? []).filter((suggestion) => suggestion.status === 'pending'),
+    [viewerDetail]
+  );
+  const viewerDismissedSuggestionCount = useMemo(
+    () => (viewerDetail?.suggestedTags ?? []).filter((suggestion) => suggestion.status === 'rejected').length,
+    [viewerDetail]
   );
 
   const openAssetViewer = useCallback((assetId: string) => {
@@ -861,6 +1017,58 @@ export const App = () => {
     });
   };
 
+  const rerunEnrichment = async (assetIds: string[], label: string) => {
+    await runAction(label, async () => {
+      const uniqueAssetIds = Array.from(new Set(assetIds));
+      if (uniqueAssetIds.length === 0) {
+        setMessage('Nothing to enrich');
+        return;
+      }
+
+      await api.rerunEnrichment(uniqueAssetIds);
+      setMessage(
+        uniqueAssetIds.length === 1
+          ? 'Asset requeued for enrichment'
+          : `Requeued ${uniqueAssetIds.length} assets for enrichment`
+      );
+      await refresh();
+    });
+  };
+
+  const acceptSuggestedTags = async (assetId: string, values: string[]) => {
+    await runAction('Apply suggested tags', async () => {
+      const detail = await api.acceptSuggestedTags(assetId, values);
+      setViewerDetail(detail);
+      setViewerSuggestedTagSelection([]);
+      setMessage(`Applied ${values.length} suggested tag${values.length === 1 ? '' : 's'}`);
+      await refreshAfterMutation([assetId]);
+    });
+  };
+
+  const rejectSuggestedTags = async (assetId: string, values: string[]) => {
+    await runAction('Dismiss suggested tags', async () => {
+      const detail = await api.rejectSuggestedTags(assetId, values);
+      setViewerDetail(detail);
+      setViewerSuggestedTagSelection((current) =>
+        current.filter((value) => !values.includes(value))
+      );
+      setMessage(`Dismissed ${values.length} suggestion${values.length === 1 ? '' : 's'}`);
+      await refreshAfterMutation([assetId]);
+    });
+  };
+
+  const batchAcceptSelectionSuggestions = async () => {
+    await runAction('Apply suggested tags for selection', async () => {
+      const result = await api.batchAcceptSuggestedTags(selectedAssetIds);
+      setMessage(
+        result.accepted > 0
+          ? `Applied ${result.accepted} suggested tag${result.accepted === 1 ? '' : 's'}`
+          : 'No pending suggestions to apply'
+      );
+      await refreshAfterMutation(selectedAssetIds);
+    });
+  };
+
   const saveCurrentSearch = async () => {
     await runAction('Save search', async () => {
       const payload: SavedSearchPayload = {
@@ -879,6 +1087,7 @@ export const App = () => {
   const applySavedSearch = (savedSearch: SavedSearchView) => {
     setSearch(savedSearch.searchText);
     setSearchMode(savedSearch.searchMode);
+    setSimilarSourceAssetId(null);
     setFilters(savedSearch.filters);
     if (savedSearch.searchText.trim()) {
       void runAction('Apply saved search', async () => {
@@ -1041,14 +1250,24 @@ export const App = () => {
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Semantic query or image path"
+              placeholder={
+                searchMode === 'semantic'
+                  ? 'Semantic query'
+                  : similarSourceAssetId
+                    ? 'Related search anchored to the selected asset'
+                    : 'Image path'
+              }
               disabled={busy}
             />
             <select
               value={searchMode}
-              onChange={(event) =>
-                setSearchMode(event.target.value as 'semantic' | 'similar-image')
-              }
+              onChange={(event) => {
+                const nextMode = event.target.value as 'semantic' | 'similar-image';
+                setSearchMode(nextMode);
+                if (nextMode === 'semantic') {
+                  setSimilarSourceAssetId(null);
+                }
+              }}
               disabled={busy}
             >
               <option value="semantic">Semantic</option>
@@ -1061,6 +1280,7 @@ export const App = () => {
               onClick={() => {
                 setSearch('');
                 setSearchResults({});
+                setSimilarSourceAssetId(null);
                 setMessage('Search cleared');
               }}
               disabled={busy}
@@ -1243,6 +1463,27 @@ export const App = () => {
         </div>
       </section>
 
+      {similarSourceAsset ? (
+        <section className="related-search-banner panel">
+          <div className="related-search-copy">
+            <strong>Similar to</strong>
+            <span>{formatAssetLabel(similarSourceAsset)}</span>
+          </div>
+          <button
+            onClick={() => {
+              setSimilarSourceAssetId(null);
+              setSearch('');
+              setSearchResults({});
+              setSearchMode('semantic');
+              setMessage('Related search cleared');
+            }}
+            disabled={busy}
+          >
+            Clear Related Search
+          </button>
+        </section>
+      ) : null}
+
       {selectedAssetIds.length > 0 ? (
         <section className="batch-bar panel" ref={batchBarRef}>
           <div className="batch-summary">
@@ -1270,6 +1511,9 @@ export const App = () => {
               disabled={busy || !hasApiKey}
             >
               Reindex Selection
+            </button>
+            <button onClick={() => void batchAcceptSelectionSuggestions()} disabled={busy}>
+              Apply Suggestions
             </button>
             <button
               onClick={() => {
@@ -1458,6 +1702,16 @@ export const App = () => {
                       className="card-quick-button"
                       onClick={(event) => {
                         event.stopPropagation();
+                        void runFindSimilar(asset.id, true);
+                      }}
+                      disabled={busy || !hasApiKey}
+                    >
+                      Similar
+                    </button>
+                    <button
+                      className="card-quick-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
                         queueBatchMode('tag', asset.id);
                       }}
                       disabled={busy}
@@ -1508,6 +1762,9 @@ export const App = () => {
                 <button onClick={() => navigateViewer('next')} disabled={!canViewNextAsset}>
                   Next
                 </button>
+                <button onClick={() => void runFindSimilar(viewerAsset.id)} disabled={!hasApiKey}>
+                  Find Similar
+                </button>
                 <button onClick={closeAssetViewer}>Close</button>
               </div>
             </div>
@@ -1553,36 +1810,172 @@ export const App = () => {
                       {viewerAsset.status === 'failed' ? 'Retry Indexing' : 'Reindex Asset'}
                     </button>
                   </div>
-                  <p>{viewerAsset.mime}</p>
-                  <p>
-                    {viewerAsset.width}×{viewerAsset.height}
-                  </p>
-                  <p>Imported {formatCreatedAt(viewerAsset.createdAt)}</p>
-                  <p>Source: {formatImportSourceLabel(viewerAsset.importSource)}</p>
-                  {viewerDetail ? (
-                    <>
-                      <p className="asset-viewer-identity">{viewerDetail.id}</p>
-                      <p className="asset-viewer-identity">{viewerDetail.checksum}</p>
-                    </>
-                  ) : null}
                 </div>
 
-                {searchResults[viewerAsset.id] ? (
+                {viewerDetail ? (
                   <div className="asset-viewer-section">
-                    <h4>Why this matched</h4>
+                    <h4>Details</h4>
                     <div className="chip-list">
-                      {searchResults[viewerAsset.id].reasons.map((reason) => (
-                        <span key={`${viewerAsset.id}-${reason}`} className="inline-chip">
-                          {reason}
+                      <span className="inline-chip">{viewerDetail.mime}</span>
+                      <span className="inline-chip">
+                        {viewerDetail.width}×{viewerDetail.height}
+                      </span>
+                      <span className="inline-chip">{formatFileSize(viewerDetail.fileSizeBytes)}</span>
+                      <span className="inline-chip">{viewerDetail.enrichment.orientation}</span>
+                      <span className="inline-chip">{viewerDetail.enrichment.aspectBucket}</span>
+                      {viewerDetail.enrichment.hasText ? (
+                        <span className="inline-chip">has text</span>
+                      ) : (
+                        <span className="inline-chip">no text</span>
+                      )}
+                      {viewerDetail.enrichment.dominantColors.map((color) => (
+                        <span key={`${viewerDetail.id}-${color}`} className="inline-chip">
+                          {formatColorFamilyLabel(color)}
                         </span>
                       ))}
                     </div>
-                    <p>
-                      {formatExplanationSummary(searchResults[viewerAsset.id].explanation).join(
-                        ' · '
-                      )}
+                    <p>Imported {formatCreatedAt(viewerDetail.createdAt)}</p>
+                    <p>Source: {formatImportSourceLabel(viewerDetail.importSource)}</p>
+                    <p className="asset-viewer-identity">{viewerDetail.id}</p>
+                    <p className="asset-viewer-identity">{viewerDetail.checksum}</p>
+                    {Object.keys(viewerDetail.enrichment.exif).length > 0 ? (
+                      <dl className="meta-pairs">
+                        {Object.entries(viewerDetail.enrichment.exif).map(([key, value]) => (
+                          <div key={key}>
+                            <dt>{key}</dt>
+                            <dd>{String(value)}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : (
+                      <p>No EXIF metadata detected.</p>
+                    )}
+                  </div>
+                ) : null}
+
+                {viewerDetail ? (
+                  <div className="asset-viewer-section">
+                    <div className="asset-viewer-section-head">
+                      <h4>Suggested Tags</h4>
+                      <div className="detail-actions">
+                        <button
+                          onClick={() =>
+                            void acceptSuggestedTags(
+                              viewerAsset.id,
+                              viewerSuggestedTagSelection.length > 0
+                                ? viewerSuggestedTagSelection
+                                : viewerPendingSuggestions.map((suggestion) => suggestion.value)
+                            )
+                          }
+                          disabled={busy || viewerPendingSuggestions.length === 0}
+                        >
+                          {viewerSuggestedTagSelection.length > 0 ? 'Apply Selected' : 'Apply All'}
+                        </button>
+                        <button
+                          onClick={() =>
+                            void rejectSuggestedTags(
+                              viewerAsset.id,
+                              viewerSuggestedTagSelection.length > 0
+                                ? viewerSuggestedTagSelection
+                                : viewerPendingSuggestions.map((suggestion) => suggestion.value)
+                            )
+                          }
+                          disabled={busy || viewerPendingSuggestions.length === 0}
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                    {viewerPendingSuggestions.length > 0 ? (
+                      <div className="suggestion-list">
+                        {viewerPendingSuggestions.map((suggestion) => {
+                          const isSelected = viewerSuggestedTagSelection.includes(suggestion.value);
+                          return (
+                            <article key={`${viewerDetail.id}-${suggestion.value}`} className="suggestion-row">
+                              <label className="suggestion-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() =>
+                                    setViewerSuggestedTagSelection((current) =>
+                                      current.includes(suggestion.value)
+                                        ? current.filter((value) => value !== suggestion.value)
+                                        : [...current, suggestion.value]
+                                    )
+                                  }
+                                  disabled={busy}
+                                />
+                                <div className="suggestion-copy">
+                                  <strong>{suggestion.value}</strong>
+                                  <span>
+                                    {formatSuggestionSource(suggestion.source)} ·{' '}
+                                    {Math.round(suggestion.confidence * 100)}%
+                                  </span>
+                                </div>
+                              </label>
+                              <div className="suggestion-actions">
+                                <button
+                                  onClick={() => void acceptSuggestedTags(viewerAsset.id, [suggestion.value])}
+                                  disabled={busy}
+                                >
+                                  Apply
+                                </button>
+                                <button
+                                  onClick={() => void rejectSuggestedTags(viewerAsset.id, [suggestion.value])}
+                                  disabled={busy}
+                                >
+                                  Dismiss
+                                </button>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p>No pending smart tags right now.</p>
+                    )}
+                    {viewerDismissedSuggestionCount > 0 ? (
+                      <p className="reason reason-secondary">
+                        {viewerDismissedSuggestionCount} suggestion
+                        {viewerDismissedSuggestionCount === 1 ? '' : 's'} dismissed for this extraction.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {viewerDetail ? (
+                  <div className="asset-viewer-section">
+                    <div className="asset-viewer-section-head">
+                      <h4>Detected Text</h4>
+                      <button
+                        onClick={() => void rerunEnrichment([viewerAsset.id], 'Re-run enrichment')}
+                        disabled={busy || !hasApiKey}
+                      >
+                        Re-run Enrichment
+                      </button>
+                    </div>
+                    <p className="reason reason-secondary">
+                      Updated {formatCreatedAt(viewerDetail.enrichment.updatedAt)} ·{' '}
+                      {formatOcrRotation(viewerDetail.enrichment.ocrRotation)}
                     </p>
-                    <p>{searchResults[viewerAsset.id].explanation.snippet}</p>
+                    {viewerDetail.enrichment.ocrLines.length > 0 ? (
+                      <div className="ocr-lines">
+                        {viewerDetail.enrichment.ocrLines.map((line, index) => (
+                          <p key={`${viewerDetail.id}-ocr-${index}`}>{line}</p>
+                        ))}
+                      </div>
+                    ) : (
+                      <p>No readable text detected for this asset yet.</p>
+                    )}
+                    {viewerDetail.enrichment.pathTokens.length > 0 ? (
+                      <div className="chip-list">
+                        {viewerDetail.enrichment.pathTokens.map((token) => (
+                          <span key={`${viewerDetail.id}-path-${token}`} className="inline-chip">
+                            {token}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
 
@@ -1682,37 +2075,26 @@ export const App = () => {
 
                 {viewerDetail ? (
                   <div className="asset-viewer-section">
-                    <h4>Extracted metadata</h4>
-                    <div className="chip-list">
-                      <span className="inline-chip">{viewerDetail.enrichment.orientation}</span>
-                      <span className="inline-chip">{viewerDetail.enrichment.aspectBucket}</span>
-                      <span className="inline-chip">
-                        {viewerDetail.enrichment.hasText ? 'has text' : 'no text'}
-                      </span>
-                      {viewerDetail.enrichment.dominantColors.map((color) => (
-                        <span key={`${viewerDetail.id}-${color}`} className="inline-chip">
-                          {formatColorFamilyLabel(color)}
-                        </span>
-                      ))}
-                    </div>
-                    {Object.keys(viewerDetail.enrichment.exif).length > 0 ? (
-                      <dl className="meta-pairs">
-                        {Object.entries(viewerDetail.enrichment.exif).map(([key, value]) => (
-                          <div key={key}>
-                            <dt>{key}</dt>
-                            <dd>{String(value)}</dd>
-                          </div>
-                        ))}
-                      </dl>
+                    <h4>Retrieval Signals</h4>
+                    {searchResults[viewerAsset.id] ? (
+                      <>
+                        <div className="chip-list">
+                          {searchResults[viewerAsset.id].reasons.map((reason) => (
+                            <span key={`${viewerAsset.id}-${reason}`} className="inline-chip">
+                              {reason}
+                            </span>
+                          ))}
+                        </div>
+                        <p>
+                          {formatExplanationSummary(searchResults[viewerAsset.id].explanation).join(
+                            ' · '
+                          )}
+                        </p>
+                        <p>{searchResults[viewerAsset.id].explanation.snippet}</p>
+                      </>
                     ) : (
-                      <p>No EXIF metadata detected.</p>
+                      <p>No active ranked search for this asset right now.</p>
                     )}
-                  </div>
-                ) : null}
-
-                {viewerDetail ? (
-                  <div className="asset-viewer-section">
-                    <h4>Retrieval caption</h4>
                     <p>{viewerDetail.retrievalCaption}</p>
                   </div>
                 ) : null}

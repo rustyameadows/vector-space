@@ -13,6 +13,7 @@
     "build:renderer": "vite build",
     "proof:imports": "npm run build:main && node ./scripts/run-import-format-demo.mjs",
     "proof:model-lock": "npm run build:main && node ./scripts/run-gemini-model-lock-proof.mjs",
+    "proof:smart-search": "npm run build:main && node ./scripts/run-smart-retrieval-proof.mjs",
     "rebuild:native": "node ./scripts/rebuild-native.mjs",
     "smoke:electron": "npm run build && node ./scripts/run-electron-import-smoke.mjs",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",

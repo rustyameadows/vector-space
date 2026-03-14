@@ -16,6 +16,9 @@ import type {
 } from '../types/domain';
 import type {
   AssetCollectionView,
+  SuggestedTagSource,
+  SuggestedTagStatus,
+  SuggestedTagView,
   AssetTagView,
   DominantColorFamily
 } from '../../shared/contracts';
@@ -89,6 +92,9 @@ const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS asset_enrichments (
     asset_id TEXT PRIMARY KEY,
     ocr_text TEXT NOT NULL DEFAULT '',
+    ocr_lines_json TEXT NOT NULL DEFAULT '[]',
+    ocr_rotation INTEGER NOT NULL DEFAULT 0,
+    path_tokens_json TEXT NOT NULL DEFAULT '[]',
     dominant_colors_json TEXT NOT NULL DEFAULT '[]',
     orientation TEXT NOT NULL DEFAULT 'square',
     aspect_bucket TEXT NOT NULL DEFAULT 'square',
@@ -121,6 +127,17 @@ const MIGRATIONS = [
     FOREIGN KEY(tag_id) REFERENCES tags(id),
     FOREIGN KEY(asset_id) REFERENCES assets(id)
   );`,
+  `CREATE TABLE IF NOT EXISTS asset_tag_suggestions (
+    asset_id TEXT NOT NULL,
+    value TEXT NOT NULL,
+    source TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    status TEXT NOT NULL,
+    extraction_version INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(asset_id, value),
+    FOREIGN KEY(asset_id) REFERENCES assets(id)
+  );`,
   `CREATE TABLE IF NOT EXISTS index_jobs (
     id TEXT PRIMARY KEY,
     asset_id TEXT NOT NULL,
@@ -147,7 +164,10 @@ const ALTERS = [
   `ALTER TABLE assets ADD COLUMN user_note TEXT NOT NULL DEFAULT '';`,
   `ALTER TABLE assets ADD COLUMN retrieval_caption TEXT NOT NULL DEFAULT '';`,
   `ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';`,
-  `ALTER TABLE thumbnails ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';`
+  `ALTER TABLE thumbnails ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';`,
+  `ALTER TABLE asset_enrichments ADD COLUMN ocr_lines_json TEXT NOT NULL DEFAULT '[]';`,
+  `ALTER TABLE asset_enrichments ADD COLUMN ocr_rotation INTEGER NOT NULL DEFAULT 0;`,
+  `ALTER TABLE asset_enrichments ADD COLUMN path_tokens_json TEXT NOT NULL DEFAULT '[]';`
 ];
 
 const parseJsonRecord = (value: string | null | undefined): Record<string, unknown> => {
@@ -176,6 +196,21 @@ const parseDominantColors = (value: string | null | undefined): DominantColorFam
   }
 };
 
+const parseStringArray = (value: string | null | undefined): string[] => {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as string[];
+    return Array.isArray(parsed)
+      ? parsed.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+};
+
 const parseExifRecord = (
   value: string | null | undefined
 ): Record<string, string | number | boolean | null> => {
@@ -188,11 +223,16 @@ const parseExifRecord = (
   ) as Record<string, string | number | boolean | null>;
 };
 
+const normalizeSuggestedTagValue = (value: string): string => value.trim().toLowerCase();
+
 const defaultEnrichmentFromAsset = (row: {
   width: number;
   height: number;
 }): AssetEnrichmentView => ({
   ocrText: '',
+  ocrLines: [],
+  ocrRotation: 0,
+  pathTokens: [],
   dominantColors: [],
   orientation: deriveOrientation(row.width, row.height),
   aspectBucket: deriveAspectBucket(row.width, row.height),
@@ -366,6 +406,9 @@ export class VectorSpaceDb {
     assetId: string,
     enrichment: {
       ocrText: string;
+      ocrLines: string[];
+      ocrRotation: 0 | 90 | 180 | 270;
+      pathTokens: string[];
       dominantColors: DominantColorFamily[];
       orientation: AssetEnrichmentView['orientation'];
       aspectBucket: AssetEnrichmentView['aspectBucket'];
@@ -379,11 +422,14 @@ export class VectorSpaceDb {
     this.db
       .prepare(
         `INSERT INTO asset_enrichments(
-          asset_id, ocr_text, dominant_colors_json, orientation, aspect_bucket, has_text,
-          exif_json, extraction_version, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          asset_id, ocr_text, ocr_lines_json, ocr_rotation, path_tokens_json, dominant_colors_json,
+          orientation, aspect_bucket, has_text, exif_json, extraction_version, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(asset_id) DO UPDATE SET
           ocr_text = excluded.ocr_text,
+          ocr_lines_json = excluded.ocr_lines_json,
+          ocr_rotation = excluded.ocr_rotation,
+          path_tokens_json = excluded.path_tokens_json,
           dominant_colors_json = excluded.dominant_colors_json,
           orientation = excluded.orientation,
           aspect_bucket = excluded.aspect_bucket,
@@ -395,6 +441,9 @@ export class VectorSpaceDb {
       .run(
         assetId,
         enrichment.ocrText,
+        JSON.stringify(enrichment.ocrLines),
+        enrichment.ocrRotation,
+        JSON.stringify(enrichment.pathTokens),
         JSON.stringify(enrichment.dominantColors),
         enrichment.orientation,
         enrichment.aspectBucket,
@@ -639,9 +688,13 @@ export class VectorSpaceDb {
         `SELECT a.id, a.created_at, a.import_source, a.mime, a.width, a.height, a.status,
         a.checksum, a.source_path, a.title, a.user_note, a.retrieval_caption, a.metadata_json,
         of.local_path as original_path,
+        of.size as original_size,
         t.local_path as thumbnail_path,
         t.updated_at as thumbnail_updated_at,
         ae.ocr_text,
+        ae.ocr_lines_json,
+        ae.ocr_rotation,
+        ae.path_tokens_json,
         ae.dominant_colors_json,
         ae.orientation,
         ae.aspect_bucket,
@@ -671,9 +724,13 @@ export class VectorSpaceDb {
           retrieval_caption: string;
           metadata_json: string;
           original_path: string;
+          original_size: number;
           thumbnail_path: string | null;
           thumbnail_updated_at: string | null;
           ocr_text: string | null;
+          ocr_lines_json: string | null;
+          ocr_rotation: number | null;
+          path_tokens_json: string | null;
           dominant_colors_json: string | null;
           orientation: AssetEnrichmentView['orientation'] | null;
           aspect_bucket: AssetEnrichmentView['aspectBucket'] | null;
@@ -694,6 +751,9 @@ export class VectorSpaceDb {
       row.orientation || row.aspect_bucket || row.dominant_colors_json || row.exif_json
         ? {
             ocrText: row.ocr_text ?? '',
+            ocrLines: parseStringArray(row.ocr_lines_json),
+            ocrRotation: (row.ocr_rotation ?? 0) as AssetEnrichmentView['ocrRotation'],
+            pathTokens: parseStringArray(row.path_tokens_json),
             dominantColors: parseDominantColors(row.dominant_colors_json),
             orientation: row.orientation ?? deriveOrientation(row.width, row.height),
             aspectBucket: row.aspect_bucket ?? deriveAspectBucket(row.width, row.height),
@@ -726,11 +786,13 @@ export class VectorSpaceDb {
       hasText: enrichment.hasText,
       checksum: row.checksum,
       sourcePath: row.source_path,
+      fileSizeBytes: row.original_size ?? 0,
       metadata: parseJsonRecord(row.metadata_json),
       searchDocument: this.getAssetSearchDocument(row.id),
       searchDocumentSections: this.listSearchDocumentSections(row.id),
       tagEntries: this.listTagEntriesForAsset(row.id),
       collectionEntries: this.listCollectionEntriesForAsset(row.id),
+      suggestedTags: this.listTagSuggestionsForAsset(row.id),
       enrichment
     };
   }
@@ -813,6 +875,8 @@ export class VectorSpaceDb {
     orientation: AssetEnrichmentView['orientation'];
     aspectBucket: AssetEnrichmentView['aspectBucket'];
     hasText: boolean;
+    ocrText: string;
+    pathTokens: string[];
   }> {
     const rows = this.db
       .prepare(
@@ -821,7 +885,9 @@ export class VectorSpaceDb {
           ae.dominant_colors_json,
           ae.orientation,
           ae.aspect_bucket,
-          ae.has_text
+          ae.has_text,
+          ae.ocr_text,
+          ae.path_tokens_json
         FROM assets a
         LEFT JOIN asset_enrichments ae ON ae.asset_id = a.id`
       )
@@ -839,6 +905,8 @@ export class VectorSpaceDb {
       orientation: AssetEnrichmentView['orientation'] | null;
       aspect_bucket: AssetEnrichmentView['aspectBucket'] | null;
       has_text: number | null;
+      ocr_text: string | null;
+      path_tokens_json: string | null;
     }>;
 
     return rows.map((row) => ({
@@ -854,7 +922,9 @@ export class VectorSpaceDb {
       dominantColors: parseDominantColors(row.dominant_colors_json),
       orientation: row.orientation ?? deriveOrientation(row.width, row.height),
       aspectBucket: row.aspect_bucket ?? deriveAspectBucket(row.width, row.height),
-      hasText: Boolean(row.has_text)
+      hasText: Boolean(row.has_text),
+      ocrText: row.ocr_text ?? '',
+      pathTokens: parseStringArray(row.path_tokens_json)
     }));
   }
 
@@ -928,6 +998,166 @@ export class VectorSpaceDb {
 
   public detachTagFromAsset(assetId: string, tagId: string): void {
     this.db.prepare('DELETE FROM asset_tags WHERE tag_id = ? AND asset_id = ?').run(tagId, assetId);
+  }
+
+  public replaceTagSuggestions(
+    assetId: string,
+    suggestions: Array<{
+      value: string;
+      source: SuggestedTagSource;
+      confidence: number;
+      extractionVersion: number;
+    }>
+  ): void {
+    const now = new Date().toISOString();
+    const normalizedSuggestions = suggestions
+      .map((suggestion) => ({
+        value: normalizeSuggestedTagValue(suggestion.value),
+        source: suggestion.source,
+        confidence: Number(suggestion.confidence.toFixed(3)),
+        extractionVersion: suggestion.extractionVersion
+      }))
+      .filter((suggestion) => suggestion.value.length > 1);
+
+    const existingRows = this.db
+      .prepare(
+        `SELECT value, status, extraction_version
+         FROM asset_tag_suggestions
+         WHERE asset_id = ?`
+      )
+      .all(assetId) as Array<{
+      value: string;
+      status: SuggestedTagStatus;
+      extraction_version: number;
+    }>;
+
+    const existingMap = new Map(
+      existingRows.map((row) => [row.value, { status: row.status, extractionVersion: row.extraction_version }])
+    );
+    const desiredValues = new Set(normalizedSuggestions.map((suggestion) => suggestion.value));
+
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `DELETE FROM asset_tag_suggestions
+           WHERE asset_id = ?
+             AND status = 'pending'
+             AND value NOT IN (${normalizedSuggestions.map(() => '?').join(', ') || "''"})`
+        )
+        .run(assetId, ...Array.from(desiredValues));
+
+      const upsert = this.db.prepare(
+        `INSERT INTO asset_tag_suggestions(
+          asset_id, value, source, confidence, status, extraction_version, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(asset_id, value) DO UPDATE SET
+          source = excluded.source,
+          confidence = excluded.confidence,
+          status = excluded.status,
+          extraction_version = excluded.extraction_version,
+          updated_at = excluded.updated_at`
+      );
+
+      normalizedSuggestions.forEach((suggestion) => {
+        const existing = existingMap.get(suggestion.value);
+        const isSuppressed =
+          existing &&
+          existing.extractionVersion === suggestion.extractionVersion &&
+          existing.status === 'rejected';
+
+        if (isSuppressed) {
+          return;
+        }
+
+        upsert.run(
+          assetId,
+          suggestion.value,
+          suggestion.source,
+          suggestion.confidence,
+          existing?.status === 'accepted' ? 'accepted' : 'pending',
+          suggestion.extractionVersion,
+          now
+        );
+      });
+    });
+
+    tx();
+  }
+
+  public listTagSuggestionsForAsset(assetId: string): SuggestedTagView[] {
+    return this.db
+      .prepare(
+        `SELECT value, source, confidence, status, updated_at as updatedAt
+         FROM asset_tag_suggestions
+         WHERE asset_id = ?
+         ORDER BY
+           CASE status
+             WHEN 'pending' THEN 0
+             WHEN 'accepted' THEN 1
+             ELSE 2
+           END,
+           confidence DESC,
+           value ASC`
+      )
+      .all(assetId) as SuggestedTagView[];
+  }
+
+  public acceptSuggestedTags(assetId: string, values: string[]): number {
+    const normalizedValues = Array.from(
+      new Set(values.map((value) => normalizeSuggestedTagValue(value)).filter(Boolean))
+    );
+    if (normalizedValues.length === 0) {
+      return 0;
+    }
+
+    const now = new Date().toISOString();
+    const update = this.db.prepare(
+      `UPDATE asset_tag_suggestions
+       SET status = 'accepted', updated_at = ?
+       WHERE asset_id = ? AND value = ?`
+    );
+    const tx = this.db.transaction(() => {
+      normalizedValues.forEach((value) => {
+        const tagId = this.ensureTag(value);
+        this.attachTagToAsset(assetId, tagId);
+        update.run(now, assetId, value);
+      });
+    });
+    tx();
+    return normalizedValues.length;
+  }
+
+  public rejectSuggestedTags(assetId: string, values: string[]): number {
+    const normalizedValues = Array.from(
+      new Set(values.map((value) => normalizeSuggestedTagValue(value)).filter(Boolean))
+    );
+    if (normalizedValues.length === 0) {
+      return 0;
+    }
+
+    const now = new Date().toISOString();
+    const update = this.db.prepare(
+      `UPDATE asset_tag_suggestions
+       SET status = 'rejected', updated_at = ?
+       WHERE asset_id = ? AND value = ?`
+    );
+    const tx = this.db.transaction(() => {
+      normalizedValues.forEach((value) => update.run(now, assetId, value));
+    });
+    tx();
+    return normalizedValues.length;
+  }
+
+  public batchAcceptSuggestedTags(assetIds: string[]): number {
+    let accepted = 0;
+    const uniqueAssetIds = Array.from(new Set(assetIds));
+    uniqueAssetIds.forEach((assetId) => {
+      const values = this.listTagSuggestionsForAsset(assetId)
+        .filter((suggestion) => suggestion.status === 'pending')
+        .map((suggestion) => suggestion.value);
+      accepted += this.acceptSuggestedTags(assetId, values);
+    });
+    return accepted;
   }
 
   public listCollections(): Array<{ id: string; name: string }> {

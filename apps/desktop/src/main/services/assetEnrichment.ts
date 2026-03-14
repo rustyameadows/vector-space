@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { AssetEnrichmentView, DominantColorFamily } from '../../shared/contracts';
 import { deriveAspectBucket, deriveOrientation } from '../../shared/assetMetadata';
+import { collectPathTokens } from './assetSearchDocument';
 
 const execFileAsync = promisify(execFile);
 const SWIFTC_PATH = '/usr/bin/swiftc';
@@ -19,9 +20,16 @@ import Vision
 
 struct Payload: Encodable {
   let ocrText: String
+  let ocrLines: [String]
+  let ocrRotation: Int
   let dominantColors: [String]
   let hasText: Bool
   let exif: [String: String]
+}
+
+struct OCRCandidate {
+  let lines: [String]
+  let rotation: Int
 }
 
 func loadCGImage(url: URL) -> CGImage? {
@@ -182,7 +190,23 @@ func extractDominantColors(cgImage: CGImage) -> [String] {
     .map(\.key)
 }
 
-func recognizeText(cgImage: CGImage) -> String {
+func rotateCGImage(_ cgImage: CGImage, degrees: Int) -> CGImage? {
+  if degrees == 0 {
+    return cgImage
+  }
+
+  let ciImage = CIImage(cgImage: cgImage)
+  let radians = CGFloat(degrees) * .pi / 180
+  let rotated = ciImage.transformed(by: CGAffineTransform(rotationAngle: radians))
+  let extent = rotated.extent.integral
+  let translated = rotated.transformed(
+    by: CGAffineTransform(translationX: -extent.origin.x, y: -extent.origin.y)
+  )
+  let context = CIContext(options: nil)
+  return context.createCGImage(translated, from: translated.extent.integral)
+}
+
+func recognizeTextLines(cgImage: CGImage) -> [String] {
   let request = VNRecognizeTextRequest()
   request.recognitionLevel = .accurate
   request.usesLanguageCorrection = true
@@ -191,14 +215,13 @@ func recognizeText(cgImage: CGImage) -> String {
 
   do {
     try handler.perform([request])
-    let lines = (request.results ?? [])
+    return (request.results ?? [])
       .compactMap { observation in
         observation.topCandidates(1).first?.string.trimmingCharacters(in: .whitespacesAndNewlines)
       }
       .filter { !$0.isEmpty }
-    return lines.joined(separator: "\n")
   } catch {
-    return ""
+    return []
   }
 }
 
@@ -214,9 +237,24 @@ guard let cgImage = loadCGImage(url: url) else {
   exit(1)
 }
 
-let text = recognizeText(cgImage: cgImage)
+let rotations = [0, 90, 180, 270]
+let bestOCR = rotations
+  .compactMap { rotation -> OCRCandidate? in
+    guard let rotated = rotateCGImage(cgImage, degrees: rotation) else { return nil }
+    let lines = recognizeTextLines(cgImage: rotated)
+    return OCRCandidate(lines: lines, rotation: rotation)
+  }
+  .max { left, right in
+    let leftScore = left.lines.joined().count + left.lines.count * 16
+    let rightScore = right.lines.joined().count + right.lines.count * 16
+    return leftScore < rightScore
+  } ?? OCRCandidate(lines: [], rotation: 0)
+
+let text = bestOCR.lines.joined(separator: "\n")
 let payload = Payload(
   ocrText: text,
+  ocrLines: bestOCR.lines,
+  ocrRotation: bestOCR.rotation,
   dominantColors: extractDominantColors(cgImage: cgImage),
   hasText: !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
   exif: extractExif(url: url)
@@ -230,7 +268,7 @@ FileHandle.standardOutput.write(data)
 
 type ExtractorPayload = Pick<
   AssetEnrichmentView,
-  'ocrText' | 'dominantColors' | 'hasText' | 'exif'
+  'ocrText' | 'ocrLines' | 'ocrRotation' | 'dominantColors' | 'hasText' | 'exif'
 >;
 
 let extractorPathPromise: Promise<string | null> | null = null;
@@ -274,6 +312,8 @@ const parseExtractorPayload = (output: string): ExtractorPayload => {
   try {
     const parsed = JSON.parse(output) as {
       ocrText?: string;
+      ocrLines?: string[];
+      ocrRotation?: number;
       dominantColors?: string[];
       hasText?: boolean;
       exif?: Record<string, string>;
@@ -281,6 +321,15 @@ const parseExtractorPayload = (output: string): ExtractorPayload => {
 
     return {
       ocrText: parsed.ocrText ?? '',
+      ocrLines: Array.isArray(parsed.ocrLines)
+        ? parsed.ocrLines.filter((entry): entry is string => typeof entry === 'string')
+        : [],
+      ocrRotation:
+        parsed.ocrRotation === 90 ||
+        parsed.ocrRotation === 180 ||
+        parsed.ocrRotation === 270
+          ? parsed.ocrRotation
+          : 0,
       dominantColors: Array.isArray(parsed.dominantColors)
         ? (parsed.dominantColors as DominantColorFamily[])
         : [],
@@ -290,6 +339,8 @@ const parseExtractorPayload = (output: string): ExtractorPayload => {
   } catch {
     return {
       ocrText: '',
+      ocrLines: [],
+      ocrRotation: 0,
       dominantColors: [],
       hasText: false,
       exif: {}
@@ -301,6 +352,7 @@ export interface AssetEnrichmentService {
   extract(input: {
     assetId: string;
     imagePath: string;
+    sourcePath: string;
     width: number;
     height: number;
     extractionVersion: number;
@@ -311,6 +363,7 @@ export class LocalAssetEnrichmentService implements AssetEnrichmentService {
   public async extract(input: {
     assetId: string;
     imagePath: string;
+    sourcePath: string;
     width: number;
     height: number;
     extractionVersion: number;
@@ -318,10 +371,14 @@ export class LocalAssetEnrichmentService implements AssetEnrichmentService {
     const orientation = deriveOrientation(input.width, input.height);
     const aspectBucket = deriveAspectBucket(input.width, input.height);
     const extractorBinary = await ensureExtractorBinary();
+    const pathTokens = collectPathTokens(input.sourcePath);
 
     if (!extractorBinary) {
       return {
         ocrText: '',
+        ocrLines: [],
+        ocrRotation: 0,
+        pathTokens,
         dominantColors: [],
         orientation,
         aspectBucket,
@@ -340,6 +397,9 @@ export class LocalAssetEnrichmentService implements AssetEnrichmentService {
 
       return {
         ocrText: payload.ocrText,
+        ocrLines: payload.ocrLines,
+        ocrRotation: payload.ocrRotation,
+        pathTokens,
         dominantColors: payload.dominantColors,
         orientation,
         aspectBucket,
@@ -351,6 +411,9 @@ export class LocalAssetEnrichmentService implements AssetEnrichmentService {
     } catch {
       return {
         ocrText: '',
+        ocrLines: [],
+        ocrRotation: 0,
+        pathTokens,
         dominantColors: [],
         orientation,
         aspectBucket,

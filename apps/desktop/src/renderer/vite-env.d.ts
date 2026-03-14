@@ -31,10 +31,14 @@ interface VectorSpaceApi {
   detachTag: (assetId: string, tagId: string) => Promise<{ ok: boolean }>;
   batchAssignTags: (assetIds: string[], tagId: string) => Promise<{ ok: boolean }>;
   batchAssignCollections: (assetIds: string[], collectionId: string) => Promise<{ ok: boolean }>;
+  batchAcceptSuggestedTags: (assetIds: string[]) => Promise<{ ok: boolean; accepted: number }>;
   updateAssetMetadata: (
     assetId: string,
     payload: { title: string; userNote: string }
   ) => Promise<AssetDetailView | null>;
+  rerunEnrichment: (assetIds: string[]) => Promise<{ ok: boolean }>;
+  acceptSuggestedTags: (assetId: string, values: string[]) => Promise<AssetDetailView | null>;
+  rejectSuggestedTags: (assetId: string, values: string[]) => Promise<AssetDetailView | null>;
   pauseIndexing: () => Promise<{ ok: boolean }>;
   resumeIndexing: () => Promise<{ ok: boolean }>;
   reindex: () => Promise<{ ok: boolean }>;
@@ -45,6 +49,7 @@ interface VectorSpaceApi {
     text?: string,
     filters?: SearchFilters
   ) => Promise<SearchResult[]>;
+  searchSimilarToAsset: (assetId: string, filters?: SearchFilters) => Promise<SearchResult[]>;
   saveSearch: (payload: SavedSearchPayload) => Promise<SavedSearchView>;
   deleteSavedSearch: (savedSearchId: string) => Promise<{ ok: boolean }>;
   getNetworkState: () => Promise<{ online: boolean }>;

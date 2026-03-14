@@ -130,6 +130,11 @@ export class HybridSearchService {
       });
 
       const searchDocument = this.db.getAssetSearchDocument(asset.assetId);
+      const titleTokens = tokenize(asset.title);
+      const noteTokens = tokenize(asset.userNote);
+      const captionTokens = tokenize(asset.retrievalCaption);
+      const ocrTokens = tokenize(asset.ocrText);
+      const pathTokens = asset.pathTokens.flatMap((token) => tokenize(token));
       const lexical = query.text
         ? lexicalScore(
             [
@@ -138,6 +143,8 @@ export class HybridSearchService {
               asset.retrievalCaption,
               asset.tags.join(' '),
               asset.collections.join(' '),
+              asset.ocrText,
+              asset.pathTokens.join(' '),
               searchDocument
             ].join(' '),
             query.text
@@ -147,20 +154,18 @@ export class HybridSearchService {
       const matchedTags = lexical.matchedTerms.filter((term) =>
         asset.tags.some((tag) => tokenize(tag).includes(term))
       );
+      const matchedOcrTerms = lexical.matchedTerms.filter((term) => ocrTokens.includes(term));
+      const matchedPathTerms = lexical.matchedTerms.filter((term) => pathTokens.includes(term));
       const matchedCollections = lexical.matchedTerms.filter((term) =>
         asset.collections.some((collection) => tokenize(collection).includes(term))
       );
       const matchedFields = [
-        lexical.matchedTerms.some((term) => tokenize(asset.title).includes(term)) ? 'title' : null,
-        lexical.matchedTerms.some((term) => tokenize(asset.userNote).includes(term))
-          ? 'note'
-          : null,
-        lexical.matchedTerms.some((term) => tokenize(asset.retrievalCaption).includes(term))
-          ? 'caption'
-          : null,
-        lexical.matchedTerms.some((term) => tokenize(searchDocument).includes(term))
-          ? 'search document'
-          : null
+        lexical.matchedTerms.some((term) => titleTokens.includes(term)) ? 'title' : null,
+        lexical.matchedTerms.some((term) => noteTokens.includes(term)) ? 'note' : null,
+        lexical.matchedTerms.some((term) => captionTokens.includes(term)) ? 'caption' : null,
+        matchedOcrTerms.length > 0 ? 'ocr' : null,
+        matchedPathTerms.length > 0 ? 'path' : null,
+        lexical.matchedTerms.some((term) => tokenize(searchDocument).includes(term)) ? 'search document' : null
       ].filter(Boolean) as string[];
       const matchedColors =
         filters.dominantColors?.filter((color) => asset.dominantColors.includes(color)) ?? [];
@@ -168,19 +173,26 @@ export class HybridSearchService {
         1,
         matchedTags.length * 0.18 +
           matchedCollections.length * 0.18 +
+          matchedOcrTerms.length * 0.08 +
+          matchedPathTerms.length * 0.05 +
           matchedFields.length * 0.1 +
           (matchedColors.length > 0 ? 0.08 : 0) +
           (asset.hasText && lexical.matchedTerms.length > 0 ? 0.06 : 0)
       );
 
-      if (lexical.score > 0.2) {
-        reasons.push('lexical/OCR-style text match');
+      if (matchedOcrTerms.length > 0) {
+        reasons.push('OCR text match');
+      } else if (lexical.score > 0.2) {
+        reasons.push('search document match');
       }
       if (matchedTags.length > 0) {
-        reasons.push('matching tags');
+        reasons.push('accepted tag match');
       }
       if (matchedCollections.length > 0) {
-        reasons.push('matching collections');
+        reasons.push('collection match');
+      }
+      if (matchedPathTerms.length > 0) {
+        reasons.push('path token match');
       }
       if (matchedColors.length > 0) {
         reasons.push('matching color filter');
@@ -205,9 +217,12 @@ export class HybridSearchService {
           matchedFields,
           matchedTerms: lexical.matchedTerms,
           matchedTags: Array.from(new Set(matchedTags)),
+          matchedOcrTerms: Array.from(new Set(matchedOcrTerms)),
+          matchedPathTerms: Array.from(new Set(matchedPathTerms)),
           matchedCollections: Array.from(new Set(matchedCollections)),
           matchedColors: matchedColors as DominantColorFamily[],
           snippet:
+            (matchedOcrTerms.length > 0 ? asset.ocrText.trim() : '') ||
             asset.userNote.trim() ||
             asset.retrievalCaption.trim() ||
             searchDocument.slice(0, 180) ||

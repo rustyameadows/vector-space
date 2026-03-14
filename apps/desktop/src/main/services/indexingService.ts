@@ -6,10 +6,33 @@ import { buildGeminiEmbeddingVersion } from '../../shared/gemini';
 import type { IndexJobView } from '../types/domain';
 import type { AssetEnrichmentService } from './assetEnrichment';
 import {
+  buildMetadataTagCandidates,
+  buildNeighborTagCandidates,
+  buildOcrTagCandidates,
+  buildPathTagCandidates,
+  mergeSuggestedTagCandidates
+} from './assetTagSuggestions';
+import {
   buildRetrievalCaption,
   buildSearchDocument,
   buildSearchSections
 } from './assetSearchDocument';
+
+const cosine = (a: number[], b: number[]): number => {
+  let dot = 0;
+  let magnitudeA = 0;
+  let magnitudeB = 0;
+
+  for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+    const left = a[index] ?? 0;
+    const right = b[index] ?? 0;
+    dot += left * right;
+    magnitudeA += left * left;
+    magnitudeB += right * right;
+  }
+
+  return dot / ((Math.sqrt(magnitudeA) || 1) * (Math.sqrt(magnitudeB) || 1));
+};
 
 const splitIntoChunks = (text: string, maxWords = 80): string[] => {
   const words = text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
@@ -32,6 +55,8 @@ export class IndexingService {
   private paused = false;
 
   private activeAssetId: string | null = null;
+
+  private activeStage: 'enrichment' | 'embedding' | null = null;
 
   private activeUpdatedAt: string | null = null;
 
@@ -84,13 +109,17 @@ export class IndexingService {
     this.enqueue(uniqueIds);
   }
 
+  public rerunEnrichment(assetIds: string[]): void {
+    this.retryAssets(assetIds);
+  }
+
   public getLiveJobs(): IndexJobView[] {
     const jobs: IndexJobView[] = [];
 
     if (this.activeAssetId) {
       jobs.push({
         assetId: this.activeAssetId,
-        stage: 'embedding',
+        stage: this.activeStage ?? 'enrichment',
         status: 'running',
         error: null,
         updatedAt: this.activeUpdatedAt ?? new Date().toISOString()
@@ -100,7 +129,7 @@ export class IndexingService {
     this.queue.forEach((assetId) => {
       jobs.push({
         assetId,
-        stage: 'embedding',
+        stage: 'enrichment',
         status: 'queued',
         error: null,
         updatedAt: this.enqueuedAt.get(assetId) ?? new Date().toISOString()
@@ -124,29 +153,33 @@ export class IndexingService {
       const startedAt = this.enqueuedAt.get(assetId) ?? new Date().toISOString();
       this.enqueuedAt.delete(assetId);
       this.activeAssetId = assetId;
+      this.activeStage = 'enrichment';
       this.activeUpdatedAt = startedAt;
 
       const asset = this.db.getAssetById(assetId);
       if (!asset) {
         this.activeAssetId = null;
+        this.activeStage = null;
         this.activeUpdatedAt = null;
         continue;
       }
 
       try {
         this.db.setAssetStatus(assetId, 'indexing');
-        this.db.createIndexJob(assetId, 'embedding', 'running');
+        this.db.createIndexJob(assetId, 'enrichment', 'running');
 
         const file = await fs.readFile(asset.originalPath);
         const filenameText = path.basename(asset.originalPath, path.extname(asset.originalPath));
         const enrichment = await this.enrichmentService.extract({
           assetId,
           imagePath: asset.originalPath,
+          sourcePath: asset.sourcePath,
           width: asset.width,
           height: asset.height,
           extractionVersion: this.provider.extractionVersion
         });
         this.db.upsertAssetEnrichment(assetId, enrichment);
+        this.db.createIndexJob(assetId, 'enrichment', 'success');
 
         const retrievalCaption = buildRetrievalCaption({
           title: asset.title || filenameText,
@@ -180,6 +213,7 @@ export class IndexingService {
           tags: asset.tags,
           collections: asset.collections,
           ocrText: enrichment.ocrText,
+          pathTokens: enrichment.pathTokens,
           dominantColors: enrichment.dominantColors,
           orientation: enrichment.orientation,
           aspectBucket: enrichment.aspectBucket,
@@ -196,6 +230,10 @@ export class IndexingService {
           }))
         );
         this.db.replaceAssetTextChunks(assetId, chunks);
+
+        this.activeStage = 'embedding';
+        this.activeUpdatedAt = new Date().toISOString();
+        this.db.createIndexJob(assetId, 'embedding', 'running');
 
         const [visualVector, textVector, jointVector] = await Promise.all([
           this.provider.embed({ taskType: 'RETRIEVAL_DOCUMENT', imageBuffer: file }),
@@ -251,18 +289,70 @@ export class IndexingService {
           embeddingVersion
         });
 
+        const existingSearchAssets = this.db.listAssetsForSearch();
+        const jointEmbeddings = new Map(
+          this.db.listEmbeddings('joint').map((entry) => [entry.assetId, entry.vector])
+        );
+        const visualEmbeddings = new Map(
+          this.db.listEmbeddings('visual').map((entry) => [entry.assetId, entry.vector])
+        );
+        const neighborCandidates = existingSearchAssets
+          .filter(
+            (candidate) =>
+              candidate.assetId !== assetId && candidate.status === 'ready' && candidate.tags.length > 0
+          )
+          .map((candidate) => {
+            const candidateJoint = jointEmbeddings.get(candidate.assetId);
+            const candidateVisual = visualEmbeddings.get(candidate.assetId);
+            const jointScore = candidateJoint ? cosine(jointVector, candidateJoint) : 0;
+            const visualScore = candidateVisual ? cosine(visualVector, candidateVisual) : 0;
+            const score = jointScore > 0 ? jointScore * 0.72 + visualScore * 0.28 : visualScore;
+
+            return {
+              tags: candidate.tags,
+              score
+            };
+          })
+          .filter((candidate) => candidate.score >= 0.72)
+          .sort((left, right) => right.score - left.score)
+          .slice(0, 6)
+          .flatMap((candidate) =>
+            candidate.tags.map((tag) => ({
+              tag,
+              score: candidate.score
+            }))
+          );
+        const suggestedTags = mergeSuggestedTagCandidates({
+          existingTags: asset.tags,
+          existingCollections: asset.collections,
+          candidates: [
+            ...buildMetadataTagCandidates(enrichment),
+            ...buildOcrTagCandidates(enrichment.ocrLines),
+            ...buildPathTagCandidates(enrichment.pathTokens),
+            ...buildNeighborTagCandidates(neighborCandidates)
+          ]
+        });
+        this.db.replaceTagSuggestions(
+          assetId,
+          suggestedTags.map((suggestion) => ({
+            ...suggestion,
+            extractionVersion: enrichment.extractionVersion
+          }))
+        );
+
         this.db.setAssetStatus(assetId, 'ready');
         this.db.createIndexJob(assetId, 'embedding', 'success');
       } catch (error: unknown) {
         this.db.setAssetStatus(assetId, 'failed');
         this.db.createIndexJob(
           assetId,
-          'embedding',
+          this.activeStage ?? 'embedding',
           'failed',
           error instanceof Error ? error.message : 'unknown error'
         );
       } finally {
         this.activeAssetId = null;
+        this.activeStage = null;
         this.activeUpdatedAt = null;
       }
     }

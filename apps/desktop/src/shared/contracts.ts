@@ -28,8 +28,23 @@ export interface AssetCollectionView {
   name: string;
 }
 
+export type SuggestedTagSource = 'ocr' | 'path' | 'neighbor' | 'metadata';
+
+export type SuggestedTagStatus = 'pending' | 'accepted' | 'rejected';
+
+export interface SuggestedTagView {
+  value: string;
+  source: SuggestedTagSource;
+  confidence: number;
+  status: SuggestedTagStatus;
+  updatedAt: string;
+}
+
 export interface AssetEnrichmentView {
   ocrText: string;
+  ocrLines: string[];
+  ocrRotation: 0 | 90 | 180 | 270;
+  pathTokens: string[];
   dominantColors: DominantColorFamily[];
   orientation: Orientation;
   aspectBucket: AspectBucket;
@@ -64,11 +79,13 @@ export interface AppAssetView {
 export interface AssetDetailView extends AppAssetView {
   checksum: string;
   sourcePath: string;
+  fileSizeBytes: number;
   metadata: Record<string, unknown>;
   searchDocument: string;
   searchDocumentSections: Array<{ section: string; content: string }>;
   tagEntries: AssetTagView[];
   collectionEntries: AssetCollectionView[];
+  suggestedTags: SuggestedTagView[];
   enrichment: AssetEnrichmentView;
 }
 
@@ -92,6 +109,8 @@ export interface SearchExplanation {
   matchedFields: string[];
   matchedTerms: string[];
   matchedTags: string[];
+  matchedOcrTerms: string[];
+  matchedPathTerms: string[];
   matchedCollections: string[];
   matchedColors: DominantColorFamily[];
   snippet: string;

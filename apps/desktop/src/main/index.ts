@@ -491,6 +491,12 @@ const registerIpc = (): void => {
     }
   );
 
+  ipcMain.handle('library:batch-accept-suggested-tags', (_event, assetIds: string[]) => {
+    const accepted = db.batchAcceptSuggestedTags(assetIds);
+    maybeReindexAssets(assetIds);
+    return { ok: true, accepted };
+  });
+
   ipcMain.handle(
     'library:update-asset-metadata',
     (_event, payload: { assetId: string; title: string; userNote: string }) => {
@@ -499,6 +505,28 @@ const registerIpc = (): void => {
         userNote: payload.userNote
       });
       maybeReindexAssets([payload.assetId]);
+      return db.getAssetById(payload.assetId);
+    }
+  );
+
+  ipcMain.handle('library:rerun-enrichment', (_event, assetIds: string[]) => {
+    indexingService.rerunEnrichment(assetIds);
+    return { ok: true };
+  });
+
+  ipcMain.handle(
+    'library:accept-suggested-tags',
+    (_event, payload: { assetId: string; values: string[] }) => {
+      db.acceptSuggestedTags(payload.assetId, payload.values);
+      maybeReindexAssets([payload.assetId]);
+      return db.getAssetById(payload.assetId);
+    }
+  );
+
+  ipcMain.handle(
+    'library:reject-suggested-tags',
+    (_event, payload: { assetId: string; values: string[] }) => {
+      db.rejectSuggestedTags(payload.assetId, payload.values);
       return db.getAssetById(payload.assetId);
     }
   );
@@ -581,6 +609,28 @@ const registerIpc = (): void => {
         mode: 'similarity',
         filters: payload.filters
       });
+    }
+  );
+
+  ipcMain.handle(
+    'library:search-similar-to-asset',
+    async (
+      _event,
+      payload: {
+        assetId: string;
+        filters?: SearchFilters;
+      }
+    ) => {
+      const asset = db.getAssetById(payload.assetId);
+      if (!asset) {
+        throw new Error('Asset not found.');
+      }
+
+      return (await runSearch({
+        imagePath: asset.originalPath,
+        mode: 'similarity',
+        filters: payload.filters
+      })).filter((result) => result.assetId !== payload.assetId);
     }
   );
 };

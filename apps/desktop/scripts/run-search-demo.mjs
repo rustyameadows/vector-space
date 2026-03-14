@@ -25,7 +25,9 @@ class FakeDb {
         dominantColors: ['blue'],
         orientation: 'landscape',
         aspectBucket: 'wide',
-        hasText: true
+        hasText: true,
+        ocrText: 'analytics metrics dashboard text',
+        pathTokens: ['product', 'dashboard']
       },
       {
         assetId: 'editorial-1',
@@ -40,7 +42,9 @@ class FakeDb {
         dominantColors: ['gray'],
         orientation: 'portrait',
         aspectBucket: 'portrait',
-        hasText: false
+        hasText: false,
+        ocrText: '',
+        pathTokens: ['editorial', 'portfolio']
       }
     ];
   }

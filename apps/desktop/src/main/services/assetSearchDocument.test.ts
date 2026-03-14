@@ -34,6 +34,7 @@ describe('assetSearchDocument', () => {
       tags: ['poster'],
       collections: ['archive'],
       ocrText: 'Summer festival 2026',
+      pathTokens: ['archive', 'summer', 'poster', 'study'],
       dominantColors: ['blue'],
       orientation: 'portrait',
       aspectBucket: 'portrait',

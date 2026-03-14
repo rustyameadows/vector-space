@@ -89,6 +89,7 @@ export const buildSearchSections = (params: {
   tags: string[];
   collections: string[];
   ocrText: string;
+  pathTokens: string[];
   dominantColors: DominantColorFamily[];
   orientation: Orientation;
   aspectBucket: AspectBucket;
@@ -96,7 +97,10 @@ export const buildSearchSections = (params: {
   sourcePath: string;
   exif: Record<string, string | number | boolean | null>;
 }): Array<{ section: string; content: string }> => {
-  const pathTokens = collectPathTokens(params.sourcePath).join(' ');
+  const pathTokens = (params.pathTokens.length > 0
+    ? params.pathTokens
+    : collectPathTokens(params.sourcePath)
+  ).join(' ');
   const exifEntries = Object.entries(params.exif)
     .filter(([, value]) => value !== null && value !== '')
     .map(([key, value]) => `${key} ${String(value)}`);
