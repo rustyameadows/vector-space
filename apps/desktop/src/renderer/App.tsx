@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { GEMINI_EMBEDDING_MODEL, getGeminiApiSettings } from '../shared/gemini';
+import {
+  getAdjacentViewerAssetId,
+  getViewerAssetIndex,
+  shouldBlockViewerKeyboardNavigation,
+  viewerAssetStillVisible
+} from './assetViewer';
 
 type Asset = {
   id: string;
@@ -74,6 +80,20 @@ const summarizeJobError = (error: string | null) => {
   }
 
   return error;
+};
+
+const formatCreatedAt = (isoTimestamp: string) => {
+  const timestamp = new Date(isoTimestamp);
+  if (Number.isNaN(timestamp.getTime())) {
+    return 'Unknown import time';
+  }
+
+  return timestamp.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  });
 };
 
 const previewPalettes = [
@@ -213,6 +233,7 @@ export const App = () => {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showJobs, setShowJobs] = useState(false);
+  const [viewerAssetId, setViewerAssetId] = useState<string | null>(null);
   const [apiModel, setApiModel] = useState<string>(GEMINI_EMBEDDING_MODEL);
 
   const selectedAsset = useMemo(
@@ -356,6 +377,43 @@ export const App = () => {
     return working;
   }, [assets, mimeFilter, searchResults]);
 
+  const assetMap = useMemo(() => new Map(assets.map((asset) => [asset.id, asset])), [assets]);
+
+  const viewerAsset = useMemo(
+    () => (viewerAssetId ? assetMap.get(viewerAssetId) ?? null : null),
+    [assetMap, viewerAssetId]
+  );
+
+  const viewerIndex = useMemo(
+    () => getViewerAssetIndex(viewerAssetId, filteredAssets),
+    [filteredAssets, viewerAssetId]
+  );
+
+  const canViewPreviousAsset = viewerIndex > 0;
+  const canViewNextAsset = viewerIndex !== -1 && viewerIndex < filteredAssets.length - 1;
+
+  const openAssetViewer = useCallback((assetId: string) => {
+    setSelectedAssetId(assetId);
+    setViewerAssetId(assetId);
+  }, []);
+
+  const closeAssetViewer = useCallback(() => {
+    setViewerAssetId(null);
+  }, []);
+
+  const navigateViewer = useCallback(
+    (direction: 'previous' | 'next') => {
+      const nextAssetId = getAdjacentViewerAssetId(viewerAssetId, filteredAssets, direction);
+      if (!nextAssetId || nextAssetId === viewerAssetId) {
+        return;
+      }
+
+      setSelectedAssetId(nextAssetId);
+      setViewerAssetId(nextAssetId);
+    },
+    [filteredAssets, viewerAssetId]
+  );
+
   const saveApiKey = async () => {
     await runAction('API key save', async () => {
       if (!apiKeyInput.trim()) {
@@ -409,11 +467,6 @@ export const App = () => {
     });
   };
 
-  const assetMap = useMemo(
-    () => new Map(assets.map((asset) => [asset.id, asset])),
-    [assets]
-  );
-
   const activeJobs = useMemo(
     () => jobs.filter((job) => job.status === 'running' || job.status === 'queued'),
     [jobs]
@@ -442,6 +495,64 @@ export const App = () => {
       ? asset.thumbnailPath
       : `app://renderer/library-asset?path=${encodeURIComponent(asset.thumbnailPath)}`;
   };
+
+  const getAssetOriginalSrc = (asset: Asset) => {
+    if (asset.originalPath.startsWith('data:')) {
+      return asset.originalPath;
+    }
+
+    const maybePreviewFallback = asset.thumbnailPath?.startsWith('data:') ? asset.thumbnailPath : null;
+    const hasRendererApi = Boolean((window as Window & { vectorSpace?: VectorSpaceApi }).vectorSpace);
+
+    if (!hasRendererApi && maybePreviewFallback) {
+      return maybePreviewFallback;
+    }
+
+    return `app://renderer/library-asset?path=${encodeURIComponent(asset.originalPath)}`;
+  };
+
+  useEffect(() => {
+    if (!viewerAssetId) {
+      return;
+    }
+
+    if (!viewerAssetStillVisible(viewerAssetId, filteredAssets)) {
+      setViewerAssetId(null);
+    }
+  }, [filteredAssets, viewerAssetId]);
+
+  useEffect(() => {
+    if (!viewerAssetId) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (shouldBlockViewerKeyboardNavigation(event.target)) {
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeAssetViewer();
+        return;
+      }
+
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        navigateViewer('previous');
+      }
+
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        navigateViewer('next');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [closeAssetViewer, navigateViewer, viewerAssetId]);
 
   return (
     <main className="app-shell" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
@@ -531,6 +642,7 @@ export const App = () => {
                 key={asset.id}
                 className={`card ${selectedAssetId === asset.id ? 'card-selected' : ''}`}
                 onClick={() => setSelectedAssetId(asset.id)}
+                onDoubleClick={() => openAssetViewer(asset.id)}
               >
                 {imageSrc ? <img src={imageSrc} alt={asset.id} /> : <div className="placeholder" />}
                 <div className="card-meta">
@@ -555,105 +667,189 @@ export const App = () => {
           <h3>Asset Detail</h3>
           {selectedAsset ? (
             <>
-              <p>{selectedAsset.id}</p>
-              <p>{selectedAsset.mime}</p>
+              <div className="detail-preview">
+                {getAssetImageSrc(selectedAsset) ? (
+                  <img src={getAssetImageSrc(selectedAsset) ?? ''} alt={selectedAsset.id} />
+                ) : (
+                  <div className="placeholder" />
+                )}
+              </div>
+              <p className="detail-name">{formatAssetLabel(selectedAsset)}</p>
               <p>
                 Status:{' '}
                 <span className={`status-pill status-${selectedAsset.status}`}>
                   {statusLabel[selectedAsset.status]}
                 </span>
               </p>
+              <p>{selectedAsset.mime}</p>
+              <p>
+                {selectedAsset.width}×{selectedAsset.height} · Imported {formatCreatedAt(selectedAsset.createdAt)}
+              </p>
               <p>Tags: {selectedAsset.tags.join(', ') || 'none'}</p>
               <p>Collections: {selectedAsset.collections.join(', ') || 'none'}</p>
 
               <div className="detail-actions">
-                <button
-                  onClick={() => void retryAssets([selectedAsset.id], 'Retry asset')}
-                  disabled={busy || !hasApiKey}
-                >
-                  {selectedAsset.status === 'failed' ? 'Retry Indexing' : 'Reindex Asset'}
+                <button onClick={() => openAssetViewer(selectedAsset.id)} disabled={busy}>
+                  View Asset
                 </button>
               </div>
-
-              <div className="inline-form">
-                <input
-                  value={tagInput}
-                  onChange={(event) => setTagInput(event.target.value)}
-                  placeholder="new tag"
-                  disabled={busy}
-                />
-                <button
-                  onClick={() =>
-                    void runAction('Add tag', async () => {
-                      if (!tagInput.trim()) {
-                        setMessage('Tag name cannot be empty');
-                        return;
-                      }
-
-                      const response = await api.createTag(tagInput.trim());
-                      await attachTag(response.id);
-                      setTagInput('');
-                      setMessage('Tag attached');
-                    })
-                  }
-                  disabled={busy}
-                >
-                  Add Tag
-                </button>
-              </div>
-
-              <div className="inline-form">
-                <input
-                  value={collectionInput}
-                  onChange={(event) => setCollectionInput(event.target.value)}
-                  placeholder="new collection"
-                  disabled={busy}
-                />
-                <button
-                  onClick={() =>
-                    void runAction('Add collection', async () => {
-                      if (!collectionInput.trim()) {
-                        setMessage('Collection name cannot be empty');
-                        return;
-                      }
-
-                      const response = await api.createCollection(collectionInput.trim());
-                      await attachCollection(response.id);
-                      setCollectionInput('');
-                      setMessage('Collection attached');
-                    })
-                  }
-                  disabled={busy}
-                >
-                  Add Collection
-                </button>
-              </div>
-
-              <div className="attach-group">
-                <h4>Attach existing</h4>
-                <div className="chip-list">
-                  {tags.map((tag) => (
-                    <button key={tag.id} onClick={() => void attachTag(tag.id)} disabled={busy}>
-                      {tag.name}
-                    </button>
-                  ))}
-                  {collections.map((collection) => (
-                    <button
-                      key={collection.id}
-                      onClick={() => void attachCollection(collection.id)}
-                      disabled={busy}
-                    >
-                      {collection.name}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <p className="detail-hint">Double-click any asset card to enter the full viewer.</p>
             </>
           ) : (
             <p>Select an asset card.</p>
           )}
         </aside>
       </section>
+
+      {viewerAsset ? (
+        <div className="settings-backdrop asset-viewer-backdrop" onClick={closeAssetViewer}>
+          <section
+            className="settings-panel panel asset-viewer-panel"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="asset-viewer-head">
+              <div className="asset-viewer-title">
+                <h3>{formatAssetLabel(viewerAsset)}</h3>
+                <p>
+                  <span className={`status-pill status-${viewerAsset.status}`}>
+                    {statusLabel[viewerAsset.status]}
+                  </span>
+                  <span>
+                    {viewerIndex + 1} of {filteredAssets.length}
+                  </span>
+                </p>
+              </div>
+              <div className="asset-viewer-head-actions">
+                <button onClick={() => navigateViewer('previous')} disabled={!canViewPreviousAsset}>
+                  Previous
+                </button>
+                <button onClick={() => navigateViewer('next')} disabled={!canViewNextAsset}>
+                  Next
+                </button>
+                <button onClick={closeAssetViewer}>Close</button>
+              </div>
+            </div>
+
+            <div className="asset-viewer-layout">
+              <div className="asset-viewer-stage">
+                <img
+                  src={getAssetOriginalSrc(viewerAsset)}
+                  alt={viewerAsset.id}
+                  className="asset-viewer-image"
+                />
+              </div>
+
+              <aside className="asset-viewer-side">
+                <div className="asset-viewer-section">
+                  <h4>Overview</h4>
+                  <p className="asset-viewer-identity">{viewerAsset.id}</p>
+                  <p>{viewerAsset.mime}</p>
+                  <p>{viewerAsset.width}×{viewerAsset.height}</p>
+                  <p>Imported {formatCreatedAt(viewerAsset.createdAt)}</p>
+                  <p>
+                    Status:{' '}
+                    <span className={`status-pill status-${viewerAsset.status}`}>
+                      {statusLabel[viewerAsset.status]}
+                    </span>
+                  </p>
+                </div>
+
+                <div className="asset-viewer-section">
+                  <h4>Actions</h4>
+                  <div className="detail-actions asset-viewer-actions">
+                    <button
+                      onClick={() => void retryAssets([viewerAsset.id], 'Retry asset')}
+                      disabled={busy || !hasApiKey}
+                    >
+                      {viewerAsset.status === 'failed' ? 'Retry Indexing' : 'Reindex Asset'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="asset-viewer-section">
+                  <h4>Tags</h4>
+                  <p>{viewerAsset.tags.join(', ') || 'none'}</p>
+                  <div className="inline-form">
+                    <input
+                      value={tagInput}
+                      onChange={(event) => setTagInput(event.target.value)}
+                      placeholder="new tag"
+                      disabled={busy}
+                    />
+                    <button
+                      onClick={() =>
+                        void runAction('Add tag', async () => {
+                          if (!tagInput.trim()) {
+                            setMessage('Tag name cannot be empty');
+                            return;
+                          }
+
+                          const response = await api.createTag(tagInput.trim());
+                          await attachTag(response.id);
+                          setTagInput('');
+                          setMessage('Tag attached');
+                        })
+                      }
+                      disabled={busy}
+                    >
+                      Add Tag
+                    </button>
+                  </div>
+                  <div className="chip-list">
+                    {tags.map((tag) => (
+                      <button key={tag.id} onClick={() => void attachTag(tag.id)} disabled={busy}>
+                        {tag.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="asset-viewer-section">
+                  <h4>Collections</h4>
+                  <p>{viewerAsset.collections.join(', ') || 'none'}</p>
+                  <div className="inline-form">
+                    <input
+                      value={collectionInput}
+                      onChange={(event) => setCollectionInput(event.target.value)}
+                      placeholder="new collection"
+                      disabled={busy}
+                    />
+                    <button
+                      onClick={() =>
+                        void runAction('Add collection', async () => {
+                          if (!collectionInput.trim()) {
+                            setMessage('Collection name cannot be empty');
+                            return;
+                          }
+
+                          const response = await api.createCollection(collectionInput.trim());
+                          await attachCollection(response.id);
+                          setCollectionInput('');
+                          setMessage('Collection attached');
+                        })
+                      }
+                      disabled={busy}
+                    >
+                      Add Collection
+                    </button>
+                  </div>
+                  <div className="chip-list">
+                    {collections.map((collection) => (
+                      <button
+                        key={collection.id}
+                        onClick={() => void attachCollection(collection.id)}
+                        disabled={busy}
+                      >
+                        {collection.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {showJobs ? (
         <div className="settings-backdrop" onClick={() => setShowJobs(false)}>

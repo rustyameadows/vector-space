@@ -7,3 +7,4 @@ apps/desktop/.electron-rebuild-home
 apps/desktop/artifacts
 docs/artifacts
 output
+.electron-rebuild-home

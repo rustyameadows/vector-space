@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { GEMINI_EMBEDDING_MODEL } from '../../shared/gemini';
 import type { AppAssetView } from '../types/domain';
 import { materializeImportFixture } from '../test-support/importFixtures';
 import { IndexingService } from './indexingService';
@@ -108,7 +109,7 @@ describe('IndexingService', () => {
 
     const service = new IndexingService(db as never, {
       name: 'gemini',
-      model: 'gemini-embedding-2-preview',
+      model: GEMINI_EMBEDDING_MODEL,
       preprocessingVersion: 3,
       extractionVersion: 2,
       ocrVersion: 2,

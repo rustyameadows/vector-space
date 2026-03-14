@@ -82,6 +82,7 @@ npm run package:mac --workspace @vector-space/desktop -- --arch=x64
 - Import from file picker, folder ingest, drag/drop, and clipboard paste.
 - SHA-256 duplicate detection and metadata persistence in SQLite.
 - Thumbnail generation and fast renderer grid browsing.
+- Single-asset viewer overlay with double-click entry, detail-panel CTA, and keyboard navigation.
 - Background indexing queue with pause/resume/reindex controls.
 - Gemini embedding pipeline pinned to `gemini-embedding-2-preview` with role-specific vectors (`visual`, `text`, `joint`).
 - Query/document task-type split for higher quality retrieval (`RETRIEVAL_DOCUMENT` vs `RETRIEVAL_QUERY`).
