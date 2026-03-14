@@ -579,76 +579,8 @@ export const App = () => {
         </div>
         <div className="header-actions">
           <p className="message-pill">{message}</p>
-          <button className="jobs-pill" onClick={() => setShowJobs(true)} disabled={busy}>
-            {jobPillLabel}
-          </button>
-          <button className="settings-btn" onClick={() => setShowSettings(true)} disabled={busy}>
-            Settings
-          </button>
-        </div>
-      </header>
-
-      <section className="toolbar panel">
-        <div className="toolbar-group toolbar-line">
-          <button onClick={onImportFiles} disabled={busy}>
-            Import Files
-          </button>
-          <button onClick={onImportFolder} disabled={busy}>
-            Import Folder
-          </button>
-          <button
-            onClick={() =>
-              void runAction('Seed demo data', async () => {
-                const result = await api.seedDemoData();
-                setMessage(
-                  `Seeded demo data: ${result.imported} imported, ${result.skipped} skipped (${result.outputDir})`
-                );
-                await refresh();
-              })
-            }
-            disabled={busy}
-          >
-            Seed Demo Data
-          </button>
-          <button
-            onClick={() =>
-              void runAction('Clipboard import', async () => {
-                const result = await api.importClipboard();
-                setMessage(
-                  `Clipboard import: ${result.imported} imported, ${result.skipped} skipped`
-                );
-                await refresh();
-              })
-            }
-            disabled={busy}
-          >
-            Paste Clipboard
-          </button>
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Semantic query or image path"
-            disabled={busy}
-          />
-          <select
-            value={searchMode}
-            onChange={(event) => setSearchMode(event.target.value as 'semantic' | 'similar-image')}
-            disabled={busy}
-          >
-            <option value="semantic">Semantic</option>
-            <option value="similar-image">Similar Image</option>
-          </select>
-          <input
-            placeholder="Filter mime (ex image/)"
-            value={mimeFilter}
-            onChange={(event) => setMimeFilter(event.target.value)}
-            disabled={busy}
-          />
-          <button onClick={runSearch} disabled={busy || !hasApiKey}>
-            Search
-          </button>
-          <label className="grid-size-control" htmlFor="grid-size-slider">
-            <span>Grid</span>
+          <label className="header-grid-control" htmlFor="grid-size-slider">
+            <span className="grid-size-label">Grid</span>
             <input
               id="grid-size-slider"
               className="grid-size-slider"
@@ -663,6 +595,79 @@ export const App = () => {
             />
             <output htmlFor="grid-size-slider">{formatGridColumnsLabel(gridColumns)}</output>
           </label>
+          <button className="jobs-pill" onClick={() => setShowJobs(true)} disabled={busy}>
+            {jobPillLabel}
+          </button>
+          <button className="settings-btn" onClick={() => setShowSettings(true)} disabled={busy}>
+            Settings
+          </button>
+        </div>
+      </header>
+
+      <section className="toolbar panel">
+        <div className="toolbar-layout">
+          <div className="toolbar-cluster toolbar-imports">
+            <button onClick={onImportFiles} disabled={busy}>
+              Import Files
+            </button>
+            <button onClick={onImportFolder} disabled={busy}>
+              Import Folder
+            </button>
+            <button
+              onClick={() =>
+                void runAction('Seed demo data', async () => {
+                  const result = await api.seedDemoData();
+                  setMessage(
+                    `Seeded demo data: ${result.imported} imported, ${result.skipped} skipped (${result.outputDir})`
+                  );
+                  await refresh();
+                })
+              }
+              disabled={busy}
+            >
+              Seed Demo Data
+            </button>
+            <button
+              onClick={() =>
+                void runAction('Clipboard import', async () => {
+                  const result = await api.importClipboard();
+                  setMessage(
+                    `Clipboard import: ${result.imported} imported, ${result.skipped} skipped`
+                  );
+                  await refresh();
+                })
+              }
+              disabled={busy}
+            >
+              Paste Clipboard
+            </button>
+          </div>
+
+          <div className="toolbar-cluster toolbar-search">
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Semantic query or image path"
+              disabled={busy}
+            />
+            <select
+              value={searchMode}
+              onChange={(event) => setSearchMode(event.target.value as 'semantic' | 'similar-image')}
+              disabled={busy}
+            >
+              <option value="semantic">Semantic</option>
+              <option value="similar-image">Similar Image</option>
+            </select>
+            <input
+              placeholder="Filter mime (ex image/)"
+              value={mimeFilter}
+              onChange={(event) => setMimeFilter(event.target.value)}
+              disabled={busy}
+            />
+            <button onClick={runSearch} disabled={busy || !hasApiKey}>
+              Search
+            </button>
+          </div>
         </div>
       </section>
 

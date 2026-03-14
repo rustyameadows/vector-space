@@ -66,19 +66,21 @@ select:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 0.75rem;
 }
 
 .title-wrap h1 {
   margin: 0;
-  font-size: 1.2rem;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
 }
 
 .header-actions {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+  flex-wrap: wrap;
 }
 
 .message-pill,
@@ -86,6 +88,26 @@ select:disabled {
   border-radius: 999px;
   background: #ffffff;
   color: #111111;
+  white-space: nowrap;
+}
+
+.header-grid-control {
+  min-width: 182px;
+  display: grid;
+  grid-template-columns: auto minmax(86px, 1fr) auto;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0.32rem 0.55rem;
+  border: 1px solid #e2e3e8;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #fbfbfc 0%, #f5f5f7 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.header-grid-control output {
+  min-width: 3.5ch;
 }
 
 .settings-btn {
@@ -93,44 +115,81 @@ select:disabled {
 }
 
 .toolbar {
-  padding: 0.42rem;
+  padding: 0.45rem;
 }
 
-.toolbar-group {
+.toolbar-layout {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
-  flex-wrap: wrap;
+  gap: 0.45rem;
+  flex-wrap: nowrap;
 }
 
-.toolbar-line input:nth-of-type(1) {
-  min-width: 280px;
-  flex: 1;
-}
-
-.toolbar-line input:nth-of-type(2) {
-  min-width: 210px;
-}
-
-.grid-size-control {
-  margin-left: auto;
-  display: grid;
-  grid-template-columns: auto minmax(130px, 170px) auto;
+.toolbar-cluster {
+  min-width: 0;
+  display: flex;
   align-items: center;
-  gap: 0.4rem;
-  min-width: 250px;
+  gap: 0.28rem;
+  padding: 0.28rem;
+  border: 1px solid #e2e3e8;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #fbfbfc 0%, #f5f5f7 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
-.grid-size-control span,
-.grid-size-control output {
+.toolbar-cluster button,
+.toolbar-cluster input,
+.toolbar-cluster select {
+  height: 38px;
+  border-radius: 11px;
+  white-space: nowrap;
+}
+
+.toolbar-imports {
+  flex: 0 1 auto;
+}
+
+.toolbar-imports button {
+  padding-inline: 0.7rem;
+  font-size: 0.78rem;
+}
+
+.toolbar-search {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) auto minmax(0, 0.78fr) auto;
+}
+
+.toolbar-search input,
+.toolbar-search select,
+.toolbar-search button {
+  min-width: 0;
+}
+
+.toolbar-search button {
+  background: #171717;
+  color: #ffffff;
+  border-color: #171717;
+  padding-inline: 0.8rem;
+}
+
+.toolbar-search button:hover:not(:disabled) {
+  border-color: #171717;
+  background: #09090b;
+}
+
+.grid-size-label,
+.header-grid-control output {
   font-size: 0.74rem;
   color: #3f3f46;
   white-space: nowrap;
 }
 
-.grid-size-control output {
+.header-grid-control output {
   text-align: right;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .grid-size-slider {
@@ -138,7 +197,8 @@ select:disabled {
   height: auto;
   border: none;
   background: transparent;
-  accent-color: #111111;
+  accent-color: #171717;
+  min-width: 0;
 }
 
 .content {
@@ -714,6 +774,25 @@ ul {
     height: auto;
   }
 
+  .toolbar-layout {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar-search {
+    flex: initial;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .toolbar-search input:nth-of-type(2) {
+    grid-column: 1 / 2;
+  }
+
+  .toolbar-search button {
+    grid-column: 2 / 3;
+    grid-row: 2 / 3;
+  }
+
   .grid {
     min-height: 440px;
   }
@@ -742,10 +821,28 @@ ul {
 }
 
 @media (max-width: 880px) {
-  .grid-size-control {
-    margin-left: 0;
+  .app-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .header-actions {
     width: 100%;
-    grid-template-columns: auto 1fr auto;
+    justify-content: flex-start;
+  }
+
+  .header-grid-control {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .toolbar-search {
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar-search button {
+    grid-column: auto;
+    grid-row: auto;
   }
 
   .asset-viewer-head {
