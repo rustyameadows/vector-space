@@ -1,4 +1,13 @@
-export type AssetStatus = 'imported' | 'indexing' | 'ready' | 'failed';
+import type {
+  AppAssetView,
+  AssetDetailView,
+  AssetEnrichmentView,
+  AssetStatus,
+  SavedSearchPayload,
+  SavedSearchView,
+  SearchFilters,
+  SearchResult
+} from '../../shared/contracts';
 
 export type EmbeddingRole = 'joint' | 'visual' | 'text' | 'chunk';
 
@@ -16,34 +25,6 @@ export interface AssetRecord {
   checksum: string;
   status: AssetStatus;
   sourcePath: string;
-}
-
-export interface SearchFilters {
-  mimePrefix?: string;
-  collectionName?: string;
-  tagNames?: string[];
-  onlyOfflineReady?: boolean;
-}
-
-export interface SearchResult {
-  assetId: string;
-  score: number;
-  reasons: string[];
-}
-
-export interface AppAssetView {
-  id: string;
-  createdAt: string;
-  mime: string;
-  width: number;
-  height: number;
-  status: AssetStatus;
-  thumbnailPath: string | null;
-  thumbnailUpdatedAt: string | null;
-  originalPath: string;
-  tags: string[];
-  collections: string[];
-  retrievalCaption: string;
 }
 
 export interface IndexJobView {
@@ -65,3 +46,14 @@ export interface EmbeddingRecord {
   extractionVersion: number;
   ocrVersion: number;
 }
+
+export type {
+  AppAssetView,
+  AssetDetailView,
+  AssetEnrichmentView,
+  AssetStatus,
+  SavedSearchPayload,
+  SavedSearchView,
+  SearchFilters,
+  SearchResult
+};

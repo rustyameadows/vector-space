@@ -9,6 +9,8 @@ Local-first macOS Electron app for a personal visual archive.
 - Xcode Command Line Tools (`xcode-select --install`)
 - Gemini API key from Google AI Studio for `gemini-embedding-2-preview`
 
+Local OCR and enrichment use Apple Vision through a small helper compiled from this repository on macOS, so the Xcode Command Line Tools requirement applies to both building and local enrichment on a fresh machine.
+
 ## Getting started
 
 ```bash
@@ -86,11 +88,14 @@ npm run package:mac --workspace @vector-space/desktop -- --arch=x64
 - SHA-256 duplicate detection and metadata persistence in SQLite.
 - Thumbnail generation and fast renderer grid browsing.
 - Startup thumbnail maintenance that repairs legacy stretched grid previews in the background.
-- Adjustable `2` to `10` up library grid with a `6` up default, hover-revealed card metadata, and a single-asset viewer overlay opened from the grid.
+- Adjustable `2` to `10` up library grid with a `6` up default, hover-revealed card metadata, multi-select batch organization, and a single-asset viewer overlay opened from the grid.
 - Background indexing queue with pause/resume/reindex controls.
 - Gemini embedding pipeline pinned to `gemini-embedding-2-preview` with role-specific vectors (`visual`, `text`, `joint`).
 - Query/document task-type split for higher quality retrieval (`RETRIEVAL_DOCUMENT` vs `RETRIEVAL_QUERY`).
-- Hybrid retrieval blending vector similarity with lexical matching and metadata filters.
+- Hybrid retrieval blending vector similarity with lexical matching, organization metadata, and archive filters.
+- Local OCR and deterministic enrichment for better long-text recall, text-heavy assets, color filtering, and orientation-aware browse/search workflows.
+- Metadata-rich asset viewer with editable title/note, retrieval caption, search document inspection, and inline tag/collection attach/remove controls.
+- Saved searches plus top-level chips for status, type, tags, collections, and enrichment-driven filters.
 - Chunked text sidecar storage for better long-text and OCR-oriented recall.
 - Embedding schema version metadata to enable safe re-indexing over time.
 - Offline mode toggle preserving local browse and retrieval behavior.
@@ -104,6 +109,7 @@ npm test
 npm run proof:imports --workspace @vector-space/desktop
 npm run smoke:electron --workspace @vector-space/desktop
 npm run proof:model-lock --workspace @vector-space/desktop
+npm run build --workspace @vector-space/desktop && node apps/desktop/scripts/run-search-demo.mjs
 npm run build
 ```
 
@@ -116,5 +122,6 @@ npm test
 npm run proof:imports --workspace @vector-space/desktop
 npm run smoke:electron --workspace @vector-space/desktop
 npm run proof:model-lock --workspace @vector-space/desktop
+npm run build --workspace @vector-space/desktop && node apps/desktop/scripts/run-search-demo.mjs
 npm run package:mac
 ```

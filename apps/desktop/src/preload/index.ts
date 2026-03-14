@@ -1,11 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { SavedSearchPayload, SearchFilters } from '../shared/contracts';
 
 const api = {
   appName: 'Vector Space Library',
   listAssets: () => ipcRenderer.invoke('library:list-assets'),
+  getAssetDetail: (assetId: string) => ipcRenderer.invoke('library:get-asset-detail', assetId),
   listJobs: () => ipcRenderer.invoke('library:list-jobs'),
   listTags: () => ipcRenderer.invoke('library:list-tags'),
   listCollections: () => ipcRenderer.invoke('library:list-collections'),
+  listSavedSearches: () => ipcRenderer.invoke('library:list-saved-searches'),
   importFiles: (paths: string[]) => ipcRenderer.invoke('library:import-files', paths),
   importFolder: (folderPath: string) => ipcRenderer.invoke('library:import-folder', folderPath),
   importClipboard: () => ipcRenderer.invoke('library:import-clipboard'),
@@ -18,12 +21,27 @@ const api = {
     ipcRenderer.invoke('library:attach-collection', { assetId, collectionId }),
   attachTag: (assetId: string, tagId: string) =>
     ipcRenderer.invoke('library:attach-tag', { assetId, tagId }),
+  detachCollection: (assetId: string, collectionId: string) =>
+    ipcRenderer.invoke('library:detach-collection', { assetId, collectionId }),
+  detachTag: (assetId: string, tagId: string) =>
+    ipcRenderer.invoke('library:detach-tag', { assetId, tagId }),
+  batchAssignTags: (assetIds: string[], tagId: string) =>
+    ipcRenderer.invoke('library:batch-assign-tags', { assetIds, tagId }),
+  batchAssignCollections: (assetIds: string[], collectionId: string) =>
+    ipcRenderer.invoke('library:batch-assign-collections', { assetIds, collectionId }),
+  updateAssetMetadata: (assetId: string, payload: { title: string; userNote: string }) =>
+    ipcRenderer.invoke('library:update-asset-metadata', { assetId, ...payload }),
   pauseIndexing: () => ipcRenderer.invoke('library:pause-indexing'),
   resumeIndexing: () => ipcRenderer.invoke('library:resume-indexing'),
   reindex: () => ipcRenderer.invoke('library:reindex'),
   retryAssets: (assetIds: string[]) => ipcRenderer.invoke('library:retry-assets', assetIds),
-  searchText: (query: string) => ipcRenderer.invoke('library:search-text', query),
-  searchImage: (imagePath: string) => ipcRenderer.invoke('library:search-image', imagePath),
+  searchText: (query: string, filters?: SearchFilters) =>
+    ipcRenderer.invoke('library:search-text', { query, filters }),
+  searchImage: (imagePath: string, text?: string, filters?: SearchFilters) =>
+    ipcRenderer.invoke('library:search-image', { imagePath, text, filters }),
+  saveSearch: (payload: SavedSearchPayload) => ipcRenderer.invoke('library:save-search', payload),
+  deleteSavedSearch: (savedSearchId: string) =>
+    ipcRenderer.invoke('library:delete-saved-search', savedSearchId),
   getNetworkState: () => ipcRenderer.invoke('library:network-state'),
   setNetworkState: (online: boolean) => ipcRenderer.invoke('library:set-network-state', online),
   getApiSettings: () => ipcRenderer.invoke('library:get-api-settings'),

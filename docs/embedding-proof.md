@@ -16,8 +16,10 @@ node apps/desktop/scripts/run-search-demo.mjs
 - `docs/artifacts/embedding-demo.html` — visual report showing ranked results/reasons for:
   - similarity-mode vector query
   - exploration-mode text query
+  - filtered archive query using orientation, color, text, and collection filters
 
 ## What to inspect
 
 - Similarity scenario should rank `dashboard-1` first due to visual/joint alignment.
 - Exploration scenario should rank `editorial-1` first with lexical reason included.
+- Filtered archive scenario should keep `dashboard-1` and surface structured explanation fields for tags, collections, and snippet text.

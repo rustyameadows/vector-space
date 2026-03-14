@@ -1,12 +1,17 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  dialog,
+  ipcMain,
+  nativeImage,
+  net,
+  protocol
+} from 'electron';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import {
-  getLibraryPaths,
-  initializeLibraryPathing,
-  LibraryPathError
-} from './library/pathManager';
+import { getLibraryPaths, initializeLibraryPathing, LibraryPathError } from './library/pathManager';
 import { VectorSpaceDb } from './db/database';
 import { ImportService } from './services/importService';
 import { SUPPORTED_IMAGE_EXTENSIONS } from './services/imageProcessing';
@@ -27,7 +32,9 @@ import {
 import { IndexingService } from './services/indexingService';
 import { HybridSearchService } from './search/hybridSearch';
 import { ThumbnailMaintenanceService } from './services/thumbnailMaintenance';
+import { LocalAssetEnrichmentService } from './services/assetEnrichment';
 import type { IndexJobView, SearchMode } from './types/domain';
+import type { SavedSearchPayload, SearchFilters } from '../shared/contracts';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const rendererDistPath = path.join(__dirname, '../renderer');
@@ -176,6 +183,14 @@ const enqueueAllImportedAssets = (): void => {
   enqueueImportedAssets(getImportedAssetIds());
 };
 
+const maybeReindexAssets = (assetIds: string[]): void => {
+  if (!online || !embeddingProvider || assetIds.length === 0) {
+    return;
+  }
+
+  indexingService.retryAssets(assetIds);
+};
+
 const importAndMaybeEnqueue = async (
   inputPaths: string[],
   source: 'file-picker' | 'folder' | 'clipboard'
@@ -271,6 +286,7 @@ const runSearch = async (params: {
   mode: SearchMode;
   text?: string;
   imagePath?: string;
+  filters?: SearchFilters;
 }): Promise<ReturnType<HybridSearchService['search']>> => {
   const provider = requireEmbeddingProvider();
   const vectors: Parameters<HybridSearchService['search']>[0]['vectors'] = {};
@@ -305,7 +321,10 @@ const runSearch = async (params: {
     mode: params.mode,
     text: normalizedText,
     vectors,
-    filters: { onlyOfflineReady: true }
+    filters: {
+      onlyOfflineReady: true,
+      ...(params.filters ?? {})
+    }
   });
 };
 
@@ -327,12 +346,16 @@ const listJobs = (): IndexJobView[] => {
 
 const registerIpc = (): void => {
   ipcMain.handle('library:list-assets', () => db.listAssets());
+  ipcMain.handle('library:get-asset-detail', (_event, assetId: string) => db.getAssetById(assetId));
   ipcMain.handle('library:list-jobs', () => listJobs());
   ipcMain.handle('library:list-tags', () => db.listTags());
   ipcMain.handle('library:list-collections', () => db.listCollections());
+  ipcMain.handle('library:list-saved-searches', () => db.listSavedSearches());
   ipcMain.handle('library:network-state', () => ({ online }));
 
-  ipcMain.handle('library:get-api-settings', () => getGeminiApiSettings(Boolean(embeddingProvider)));
+  ipcMain.handle('library:get-api-settings', () =>
+    getGeminiApiSettings(Boolean(embeddingProvider))
+  );
 
   ipcMain.handle('library:set-api-key', async (_event, apiKey: string) => {
     if (isKeychainDisabled) {
@@ -397,14 +420,14 @@ const registerIpc = (): void => {
 
   ipcMain.handle('library:open-file-dialog', async () => {
     const response = await dialog.showOpenDialog({
-        properties: ['openFile', 'multiSelections'],
-        filters: [
-          {
-            name: 'Images',
-            extensions: SUPPORTED_IMAGE_EXTENSIONS.map((extension) => extension.slice(1))
-          }
-        ]
-      });
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        {
+          name: 'Images',
+          extensions: SUPPORTED_IMAGE_EXTENSIONS.map((extension) => extension.slice(1))
+        }
+      ]
+    });
     return response.filePaths;
   });
 
@@ -424,12 +447,72 @@ const registerIpc = (): void => {
     'library:attach-collection',
     (_event, payload: { assetId: string; collectionId: string }) => {
       db.attachAssetToCollection(payload.assetId, payload.collectionId);
+      maybeReindexAssets([payload.assetId]);
       return { ok: true };
     }
   );
 
   ipcMain.handle('library:attach-tag', (_event, payload: { assetId: string; tagId: string }) => {
     db.attachTagToAsset(payload.assetId, payload.tagId);
+    maybeReindexAssets([payload.assetId]);
+    return { ok: true };
+  });
+
+  ipcMain.handle(
+    'library:detach-collection',
+    (_event, payload: { assetId: string; collectionId: string }) => {
+      db.detachAssetFromCollection(payload.assetId, payload.collectionId);
+      maybeReindexAssets([payload.assetId]);
+      return { ok: true };
+    }
+  );
+
+  ipcMain.handle('library:detach-tag', (_event, payload: { assetId: string; tagId: string }) => {
+    db.detachTagFromAsset(payload.assetId, payload.tagId);
+    maybeReindexAssets([payload.assetId]);
+    return { ok: true };
+  });
+
+  ipcMain.handle(
+    'library:batch-assign-tags',
+    (_event, payload: { assetIds: string[]; tagId: string }) => {
+      db.attachTagToAssets(payload.assetIds, payload.tagId);
+      maybeReindexAssets(payload.assetIds);
+      return { ok: true };
+    }
+  );
+
+  ipcMain.handle(
+    'library:batch-assign-collections',
+    (_event, payload: { assetIds: string[]; collectionId: string }) => {
+      db.attachAssetsToCollection(payload.assetIds, payload.collectionId);
+      maybeReindexAssets(payload.assetIds);
+      return { ok: true };
+    }
+  );
+
+  ipcMain.handle(
+    'library:update-asset-metadata',
+    (_event, payload: { assetId: string; title: string; userNote: string }) => {
+      db.updateAssetMetadata(payload.assetId, {
+        title: payload.title,
+        userNote: payload.userNote
+      });
+      maybeReindexAssets([payload.assetId]);
+      return db.getAssetById(payload.assetId);
+    }
+  );
+
+  ipcMain.handle('library:save-search', (_event, payload: SavedSearchPayload) => {
+    const normalizedName = requireNonEmptyName(payload.name, 'Saved search name');
+    return db.saveSearch({
+      ...payload,
+      name: normalizedName
+    });
+  });
+
+  ipcMain.handle('library:delete-saved-search', (_event, savedSearchId: string) => {
+    db.deleteSavedSearch(savedSearchId);
     return { ok: true };
   });
 
@@ -453,13 +536,53 @@ const registerIpc = (): void => {
     return { ok: true };
   });
 
-  ipcMain.handle('library:search-text', async (_event, query: string) => {
-    return runSearch({ text: query, mode: 'exploration' });
-  });
+  ipcMain.handle(
+    'library:search-text',
+    async (
+      _event,
+      payload:
+        | string
+        | {
+            query: string;
+            filters?: SearchFilters;
+          }
+    ) => {
+      if (typeof payload === 'string') {
+        return runSearch({ text: payload, mode: 'exploration' });
+      }
 
-  ipcMain.handle('library:search-image', async (_event, imagePath: string) => {
-    return runSearch({ imagePath, mode: 'similarity' });
-  });
+      return runSearch({
+        text: payload.query,
+        mode: 'exploration',
+        filters: payload.filters
+      });
+    }
+  );
+
+  ipcMain.handle(
+    'library:search-image',
+    async (
+      _event,
+      payload:
+        | string
+        | {
+            imagePath: string;
+            text?: string;
+            filters?: SearchFilters;
+          }
+    ) => {
+      if (typeof payload === 'string') {
+        return runSearch({ imagePath: payload, mode: 'similarity' });
+      }
+
+      return runSearch({
+        imagePath: payload.imagePath,
+        text: payload.text,
+        mode: 'similarity',
+        filters: payload.filters
+      });
+    }
+  );
 };
 
 app.whenReady().then(async () => {
@@ -471,15 +594,19 @@ app.whenReady().then(async () => {
     importService = new ImportService(db);
     embeddingProvider = await createProviderFromKeychain();
 
-    indexingService = new IndexingService(db, {
-      name: 'gemini',
-      model: GEMINI_EMBEDDING_MODEL,
-      preprocessingVersion: GEMINI_PREPROCESSING_VERSION,
-      extractionVersion: GEMINI_EXTRACTION_VERSION,
-      ocrVersion: GEMINI_OCR_VERSION,
-      outputDimensionality: GEMINI_OUTPUT_DIMENSIONALITY,
-      embed: async (request) => requireEmbeddingProvider().embed(request)
-    });
+    indexingService = new IndexingService(
+      db,
+      {
+        name: 'gemini',
+        model: GEMINI_EMBEDDING_MODEL,
+        preprocessingVersion: GEMINI_PREPROCESSING_VERSION,
+        extractionVersion: GEMINI_EXTRACTION_VERSION,
+        ocrVersion: GEMINI_OCR_VERSION,
+        outputDimensionality: GEMINI_OUTPUT_DIMENSIONALITY,
+        embed: async (request) => requireEmbeddingProvider().embed(request)
+      },
+      new LocalAssetEnrichmentService()
+    );
     searchService = new HybridSearchService(db);
     thumbnailMaintenanceService = new ThumbnailMaintenanceService(db);
     registerIpc();

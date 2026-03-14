@@ -4,42 +4,20 @@ import { VectorSpaceDb } from '../db/database';
 import type { EmbeddingProvider } from '../embedding/provider';
 import { buildGeminiEmbeddingVersion } from '../../shared/gemini';
 import type { IndexJobView } from '../types/domain';
-
-const tokenize = (value: string): string[] =>
-  value
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-
-const dedupeTokens = (tokens: string[]): string[] => Array.from(new Set(tokens));
+import type { AssetEnrichmentService } from './assetEnrichment';
+import {
+  buildRetrievalCaption,
+  buildSearchDocument,
+  buildSearchSections
+} from './assetSearchDocument';
 
 const splitIntoChunks = (text: string, maxWords = 80): string[] => {
-  const words = text
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter(Boolean);
+  const words = text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
   const chunks: string[] = [];
   for (let i = 0; i < words.length; i += maxWords) {
     chunks.push(words.slice(i, i + maxWords).join(' '));
   }
   return chunks;
-};
-
-const captionFromAsset = (params: {
-  title: string;
-  tags: string[];
-  collections: string[];
-  note: string;
-}): string => {
-  const style = params.tags.length > 0 ? `Tags: ${params.tags.join(', ')}.` : 'Tags: none.';
-  const boards =
-    params.collections.length > 0
-      ? `Boards: ${params.collections.join(', ')}.`
-      : 'Boards: uncategorized.';
-  const note = params.note.trim() ? `Note: ${params.note.trim()}.` : 'Note: none.';
-  return `${params.title || 'Untitled inspiration'}; ${style} ${boards} ${note}`;
 };
 
 export class IndexingService {
@@ -59,7 +37,8 @@ export class IndexingService {
 
   public constructor(
     private readonly db: VectorSpaceDb,
-    private readonly provider: EmbeddingProvider
+    private readonly provider: EmbeddingProvider,
+    private readonly enrichmentService: AssetEnrichmentService
   ) {}
 
   public enqueue(assetIds: string[]): void {
@@ -160,24 +139,62 @@ export class IndexingService {
 
         const file = await fs.readFile(asset.originalPath);
         const filenameText = path.basename(asset.originalPath, path.extname(asset.originalPath));
-        const pseudoOcrTokens = dedupeTokens(tokenize(filenameText));
-        const pseudoOcr = pseudoOcrTokens.join(' ');
+        const enrichment = await this.enrichmentService.extract({
+          assetId,
+          imagePath: asset.originalPath,
+          width: asset.width,
+          height: asset.height,
+          extractionVersion: this.provider.extractionVersion
+        });
+        this.db.upsertAssetEnrichment(assetId, enrichment);
 
-        const retrievalCaption = captionFromAsset({
+        const retrievalCaption = buildRetrievalCaption({
           title: asset.title || filenameText,
           tags: asset.tags,
           collections: asset.collections,
-          note: asset.userNote
+          note: asset.userNote,
+          enrichment
+        });
+        const metadataJson = JSON.stringify({
+          orientation: enrichment.orientation,
+          aspectBucket: enrichment.aspectBucket,
+          dominantColors: enrichment.dominantColors,
+          hasText: enrichment.hasText,
+          exif: enrichment.exif,
+          embeddingVersion: buildGeminiEmbeddingVersion({
+            model: this.provider.model,
+            preprocessingVersion: this.provider.preprocessingVersion,
+            extractionVersion: this.provider.extractionVersion,
+            ocrVersion: this.provider.ocrVersion
+          })
+        });
+        this.db.updateAssetDerivedFields(assetId, {
+          retrievalCaption,
+          metadataJson
         });
 
-        const textCorpus = [asset.title, asset.userNote, retrievalCaption, ...asset.tags, pseudoOcr]
-          .join('\n')
-          .trim();
+        const searchSections = buildSearchSections({
+          title: asset.title || filenameText,
+          note: asset.userNote,
+          retrievalCaption,
+          tags: asset.tags,
+          collections: asset.collections,
+          ocrText: enrichment.ocrText,
+          dominantColors: enrichment.dominantColors,
+          orientation: enrichment.orientation,
+          aspectBucket: enrichment.aspectBucket,
+          hasText: enrichment.hasText,
+          sourcePath: asset.sourcePath,
+          exif: enrichment.exif
+        });
+        const textCorpus = buildSearchDocument(searchSections);
 
-        const chunks = splitIntoChunks(textCorpus, 40).map((content, index) => ({
-          section: index === 0 ? 'summary' : `chunk-${index + 1}`,
-          content
-        }));
+        const chunks = searchSections.flatMap((section) =>
+          splitIntoChunks(section.content, 60).map((content, index) => ({
+            section: index === 0 ? section.section : `${section.section}-${index + 1}`,
+            content
+          }))
+        );
         this.db.replaceAssetTextChunks(assetId, chunks);
 
         const [visualVector, textVector, jointVector] = await Promise.all([
@@ -186,7 +203,7 @@ export class IndexingService {
           this.provider.embed({
             taskType: 'RETRIEVAL_DOCUMENT',
             imageBuffer: file,
-            textParts: [asset.title, retrievalCaption, asset.userNote, pseudoOcr]
+            textParts: [asset.title, retrievalCaption, asset.userNote, enrichment.ocrText]
           })
         ]);
 

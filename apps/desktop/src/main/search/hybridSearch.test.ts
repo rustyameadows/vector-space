@@ -12,12 +12,19 @@ interface FakeAsset {
   status: string;
   mime: string;
   createdAt: string;
+  dominantColors: string[];
+  orientation: 'portrait' | 'landscape' | 'square';
+  aspectBucket: 'wide' | 'portrait' | 'square' | 'standard' | 'tall' | 'ultrawide';
+  hasText: boolean;
 }
 
 class FakeDb {
   public constructor(
     private readonly assets: FakeAsset[],
-    private readonly embeddings: Record<EmbeddingRole, Array<{ assetId: string; vector: number[] }>>,
+    private readonly embeddings: Record<
+      EmbeddingRole,
+      Array<{ assetId: string; vector: number[] }>
+    >,
     private readonly docs: Record<string, string>
   ) {}
 
@@ -44,7 +51,11 @@ const assets: FakeAsset[] = [
     collections: ['product'],
     status: 'ready',
     mime: 'image/png',
-    createdAt: '2026-01-01T00:00:00.000Z'
+    createdAt: '2026-01-01T00:00:00.000Z',
+    dominantColors: ['blue'],
+    orientation: 'landscape',
+    aspectBucket: 'wide',
+    hasText: true
   },
   {
     assetId: 'editorial-1',
@@ -55,7 +66,11 @@ const assets: FakeAsset[] = [
     collections: ['inspiration'],
     status: 'ready',
     mime: 'image/png',
-    createdAt: '2026-01-02T00:00:00.000Z'
+    createdAt: '2026-01-02T00:00:00.000Z',
+    dominantColors: ['gray'],
+    orientation: 'portrait',
+    aspectBucket: 'portrait',
+    hasText: false
   },
   {
     assetId: 'not-ready',
@@ -66,7 +81,11 @@ const assets: FakeAsset[] = [
     collections: ['product'],
     status: 'imported',
     mime: 'image/png',
-    createdAt: '2026-01-03T00:00:00.000Z'
+    createdAt: '2026-01-03T00:00:00.000Z',
+    dominantColors: ['blue'],
+    orientation: 'landscape',
+    aspectBucket: 'wide',
+    hasText: false
   }
 ];
 
@@ -109,6 +128,7 @@ describe('HybridSearchService', () => {
     expect(results[0]?.assetId).toBe('dashboard-1');
     expect(results.map((entry) => entry.assetId)).not.toContain('not-ready');
     expect(results[0]?.reasons.join(' ')).toContain('visual similarity');
+    expect(results[0]?.explanation.vectorScore).toBeGreaterThan(0.5);
   });
 
   it('applies lexical matching for text-heavy exploration queries', () => {
@@ -124,6 +144,7 @@ describe('HybridSearchService', () => {
 
     expect(results[0]?.assetId).toBe('editorial-1');
     expect(results[0]?.reasons).toContain('lexical/OCR-style text match');
+    expect(results[0]?.explanation.matchedFields).toContain('title');
   });
 
   it('supports metadata filters for collection and tags', () => {
@@ -134,10 +155,31 @@ describe('HybridSearchService', () => {
       mode: 'exploration',
       text: 'dashboard analytics',
       vectors: { text: [1, 0, 0], joint: [1, 0, 0] },
-      filters: { onlyOfflineReady: true, collectionName: 'product', tagNames: ['dashboard'] }
+      filters: { onlyOfflineReady: true, collectionNames: ['product'], tagNames: ['dashboard'] }
     });
 
     expect(results).toHaveLength(1);
     expect(results[0]?.assetId).toBe('dashboard-1');
+  });
+
+  it('supports enrichment filters for orientation, color, and text presence', () => {
+    const db = new FakeDb(assets, embeddings, docs);
+    const service = new HybridSearchService(db as never);
+
+    const results = service.search({
+      mode: 'exploration',
+      text: 'dashboard blue text',
+      vectors: { text: [1, 0, 0], joint: [1, 0, 0] },
+      filters: {
+        onlyOfflineReady: true,
+        orientation: 'landscape',
+        dominantColors: ['blue'],
+        hasText: true
+      }
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.assetId).toBe('dashboard-1');
+    expect(results[0]?.reasons).toContain('matching color filter');
   });
 });

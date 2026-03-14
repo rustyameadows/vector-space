@@ -4,11 +4,22 @@ import { randomUUID } from 'node:crypto';
 import { collapseIndexJobHistory, collectInterruptedJobRowIds } from '../jobs/jobState';
 import type {
   AppAssetView,
+  AssetDetailView,
+  AssetEnrichmentView,
   AssetRecord,
+  AssetStatus,
+  SavedSearchPayload,
+  SavedSearchView,
   EmbeddingRecord,
   EmbeddingRole,
   IndexJobView
 } from '../types/domain';
+import type {
+  AssetCollectionView,
+  AssetTagView,
+  DominantColorFamily
+} from '../../shared/contracts';
+import { deriveAspectBucket, deriveOrientation } from '../../shared/assetMetadata';
 
 const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS assets (
@@ -75,6 +86,18 @@ const MIGRATIONS = [
     FOREIGN KEY(asset_id) REFERENCES assets(id)
   );`,
   `CREATE INDEX IF NOT EXISTS idx_asset_text_chunks_asset_id ON asset_text_chunks(asset_id);`,
+  `CREATE TABLE IF NOT EXISTS asset_enrichments (
+    asset_id TEXT PRIMARY KEY,
+    ocr_text TEXT NOT NULL DEFAULT '',
+    dominant_colors_json TEXT NOT NULL DEFAULT '[]',
+    orientation TEXT NOT NULL DEFAULT 'square',
+    aspect_bucket TEXT NOT NULL DEFAULT 'square',
+    has_text INTEGER NOT NULL DEFAULT 0,
+    exif_json TEXT NOT NULL DEFAULT '{}',
+    extraction_version INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(asset_id) REFERENCES assets(id)
+  );`,
   `CREATE TABLE IF NOT EXISTS collections (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -108,6 +131,13 @@ const MIGRATIONS = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY(asset_id) REFERENCES assets(id)
+  );`,
+  `CREATE TABLE IF NOT EXISTS saved_searches (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   );`
 ];
 
@@ -119,6 +149,58 @@ const ALTERS = [
   `ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';`,
   `ALTER TABLE thumbnails ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';`
 ];
+
+const parseJsonRecord = (value: string | null | undefined): Record<string, unknown> => {
+  if (!value) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const parseDominantColors = (value: string | null | undefined): DominantColorFamily[] => {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as string[];
+    return Array.isArray(parsed) ? (parsed as DominantColorFamily[]) : [];
+  } catch {
+    return [];
+  }
+};
+
+const parseExifRecord = (
+  value: string | null | undefined
+): Record<string, string | number | boolean | null> => {
+  const parsed = parseJsonRecord(value);
+
+  return Object.fromEntries(
+    Object.entries(parsed).filter(
+      ([, entry]) => ['string', 'number', 'boolean'].includes(typeof entry) || entry === null
+    )
+  ) as Record<string, string | number | boolean | null>;
+};
+
+const defaultEnrichmentFromAsset = (row: {
+  width: number;
+  height: number;
+}): AssetEnrichmentView => ({
+  ocrText: '',
+  dominantColors: [],
+  orientation: deriveOrientation(row.width, row.height),
+  aspectBucket: deriveAspectBucket(row.width, row.height),
+  hasText: false,
+  exif: {},
+  extractionVersion: 0,
+  updatedAt: ''
+});
 
 export class VectorSpaceDb {
   private db: Database.Database;
@@ -256,6 +338,73 @@ export class VectorSpaceDb {
       );
   }
 
+  public updateAssetMetadata(
+    assetId: string,
+    metadata: {
+      title: string;
+      userNote: string;
+    }
+  ): void {
+    this.db
+      .prepare('UPDATE assets SET title = ?, user_note = ? WHERE id = ?')
+      .run(metadata.title.trim(), metadata.userNote.trim(), assetId);
+  }
+
+  public updateAssetDerivedFields(
+    assetId: string,
+    fields: {
+      retrievalCaption: string;
+      metadataJson: string;
+    }
+  ): void {
+    this.db
+      .prepare('UPDATE assets SET retrieval_caption = ?, metadata_json = ? WHERE id = ?')
+      .run(fields.retrievalCaption, fields.metadataJson, assetId);
+  }
+
+  public upsertAssetEnrichment(
+    assetId: string,
+    enrichment: {
+      ocrText: string;
+      dominantColors: DominantColorFamily[];
+      orientation: AssetEnrichmentView['orientation'];
+      aspectBucket: AssetEnrichmentView['aspectBucket'];
+      hasText: boolean;
+      exif: Record<string, string | number | boolean | null>;
+      extractionVersion: number;
+      updatedAt?: string;
+    }
+  ): void {
+    const updatedAt = enrichment.updatedAt ?? new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO asset_enrichments(
+          asset_id, ocr_text, dominant_colors_json, orientation, aspect_bucket, has_text,
+          exif_json, extraction_version, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(asset_id) DO UPDATE SET
+          ocr_text = excluded.ocr_text,
+          dominant_colors_json = excluded.dominant_colors_json,
+          orientation = excluded.orientation,
+          aspect_bucket = excluded.aspect_bucket,
+          has_text = excluded.has_text,
+          exif_json = excluded.exif_json,
+          extraction_version = excluded.extraction_version,
+          updated_at = excluded.updated_at`
+      )
+      .run(
+        assetId,
+        enrichment.ocrText,
+        JSON.stringify(enrichment.dominantColors),
+        enrichment.orientation,
+        enrichment.aspectBucket,
+        enrichment.hasText ? 1 : 0,
+        JSON.stringify(enrichment.exif),
+        enrichment.extractionVersion,
+        updatedAt
+      );
+  }
+
   public replaceAssetTextChunks(
     assetId: string,
     chunks: Array<{ section: string; content: string }>
@@ -378,31 +527,45 @@ export class VectorSpaceDb {
   public listAssets(): AppAssetView[] {
     const rows = this.db
       .prepare(
-        `SELECT a.id, a.created_at, a.mime, a.width, a.height, a.status, a.retrieval_caption,
+        `SELECT a.id, a.created_at, a.import_source, a.mime, a.width, a.height, a.status,
+        a.title, a.user_note, a.retrieval_caption,
         t.local_path as thumbnail_path,
         t.updated_at as thumbnail_updated_at,
-        of.local_path as original_path
+        of.local_path as original_path,
+        ae.dominant_colors_json,
+        ae.orientation,
+        ae.aspect_bucket,
+        ae.has_text
         FROM assets a
         LEFT JOIN thumbnails t ON t.asset_id = a.id AND t.variant='grid'
         LEFT JOIN asset_files of ON of.asset_id = a.id AND of.role='original'
+        LEFT JOIN asset_enrichments ae ON ae.asset_id = a.id
         ORDER BY a.created_at DESC`
       )
       .all() as Array<{
       id: string;
       created_at: string;
+      import_source: AppAssetView['importSource'];
       mime: string;
       width: number;
       height: number;
-      status: 'imported' | 'indexing' | 'ready' | 'failed';
+      status: AssetStatus;
+      title: string;
+      user_note: string;
       retrieval_caption: string;
       thumbnail_path: string | null;
       thumbnail_updated_at: string | null;
       original_path: string;
+      dominant_colors_json: string | null;
+      orientation: AssetEnrichmentView['orientation'] | null;
+      aspect_bucket: AssetEnrichmentView['aspectBucket'] | null;
+      has_text: number | null;
     }>;
 
     return rows.map((row) => ({
       id: row.id,
       createdAt: row.created_at,
+      importSource: row.import_source,
       mime: row.mime,
       width: row.width,
       height: row.height,
@@ -410,9 +573,15 @@ export class VectorSpaceDb {
       thumbnailPath: row.thumbnail_path,
       thumbnailUpdatedAt: row.thumbnail_updated_at,
       originalPath: row.original_path,
+      title: row.title,
+      userNote: row.user_note,
       retrievalCaption: row.retrieval_caption,
       tags: this.listTagsForAsset(row.id),
-      collections: this.listCollectionsForAsset(row.id)
+      collections: this.listCollectionsForAsset(row.id),
+      dominantColors: parseDominantColors(row.dominant_colors_json),
+      orientation: row.orientation ?? deriveOrientation(row.width, row.height),
+      aspectBucket: row.aspect_bucket ?? deriveAspectBucket(row.width, row.height),
+      hasText: Boolean(row.has_text)
     }));
   }
 
@@ -464,31 +633,54 @@ export class VectorSpaceDb {
     }));
   }
 
-  public getAssetById(assetId: string):
-    | {
-        id: string;
-        title: string;
-        userNote: string;
-        retrievalCaption: string;
-        originalPath: string;
-        tags: string[];
-        collections: string[];
-      }
-    | null {
+  public getAssetById(assetId: string): AssetDetailView | null {
     const row = this.db
       .prepare(
-        `SELECT a.id, a.title, a.user_note, a.retrieval_caption, of.local_path as original_path
+        `SELECT a.id, a.created_at, a.import_source, a.mime, a.width, a.height, a.status,
+        a.checksum, a.source_path, a.title, a.user_note, a.retrieval_caption, a.metadata_json,
+        of.local_path as original_path,
+        t.local_path as thumbnail_path,
+        t.updated_at as thumbnail_updated_at,
+        ae.ocr_text,
+        ae.dominant_colors_json,
+        ae.orientation,
+        ae.aspect_bucket,
+        ae.has_text,
+        ae.exif_json,
+        ae.extraction_version,
+        ae.updated_at as enrichment_updated_at
         FROM assets a
         LEFT JOIN asset_files of ON of.asset_id = a.id AND of.role='original'
+        LEFT JOIN thumbnails t ON t.asset_id = a.id AND t.variant='grid'
+        LEFT JOIN asset_enrichments ae ON ae.asset_id = a.id
         WHERE a.id = ? LIMIT 1`
       )
       .get(assetId) as
       | {
           id: string;
+          created_at: string;
+          import_source: AppAssetView['importSource'];
+          mime: string;
+          width: number;
+          height: number;
+          status: AssetStatus;
+          checksum: string;
+          source_path: string;
           title: string;
           user_note: string;
           retrieval_caption: string;
+          metadata_json: string;
           original_path: string;
+          thumbnail_path: string | null;
+          thumbnail_updated_at: string | null;
+          ocr_text: string | null;
+          dominant_colors_json: string | null;
+          orientation: AssetEnrichmentView['orientation'] | null;
+          aspect_bucket: AssetEnrichmentView['aspectBucket'] | null;
+          has_text: number | null;
+          exif_json: string | null;
+          extraction_version: number | null;
+          enrichment_updated_at: string | null;
         }
       | undefined;
 
@@ -496,14 +688,50 @@ export class VectorSpaceDb {
       return null;
     }
 
+    const tags = this.listTagsForAsset(row.id);
+    const collections = this.listCollectionsForAsset(row.id);
+    const enrichment =
+      row.orientation || row.aspect_bucket || row.dominant_colors_json || row.exif_json
+        ? {
+            ocrText: row.ocr_text ?? '',
+            dominantColors: parseDominantColors(row.dominant_colors_json),
+            orientation: row.orientation ?? deriveOrientation(row.width, row.height),
+            aspectBucket: row.aspect_bucket ?? deriveAspectBucket(row.width, row.height),
+            hasText: Boolean(row.has_text),
+            exif: parseExifRecord(row.exif_json),
+            extractionVersion: row.extraction_version ?? 0,
+            updatedAt: row.enrichment_updated_at ?? ''
+          }
+        : defaultEnrichmentFromAsset(row);
+
     return {
       id: row.id,
+      createdAt: row.created_at,
+      importSource: row.import_source,
+      mime: row.mime,
+      width: row.width,
+      height: row.height,
+      status: row.status,
+      thumbnailPath: row.thumbnail_path,
+      thumbnailUpdatedAt: row.thumbnail_updated_at,
       title: row.title,
       userNote: row.user_note,
       retrievalCaption: row.retrieval_caption,
       originalPath: row.original_path,
-      tags: this.listTagsForAsset(row.id),
-      collections: this.listCollectionsForAsset(row.id)
+      tags,
+      collections,
+      dominantColors: enrichment.dominantColors,
+      orientation: enrichment.orientation,
+      aspectBucket: enrichment.aspectBucket,
+      hasText: enrichment.hasText,
+      checksum: row.checksum,
+      sourcePath: row.source_path,
+      metadata: parseJsonRecord(row.metadata_json),
+      searchDocument: this.getAssetSearchDocument(row.id),
+      searchDocumentSections: this.listSearchDocumentSections(row.id),
+      tagEntries: this.listTagEntriesForAsset(row.id),
+      collectionEntries: this.listCollectionEntriesForAsset(row.id),
+      enrichment
     };
   }
 
@@ -531,9 +759,7 @@ export class VectorSpaceDb {
 
   public getAssetSearchDocument(assetId: string): string {
     const row = this.db
-      .prepare(
-        `SELECT title, user_note, retrieval_caption FROM assets WHERE id = ? LIMIT 1`
-      )
+      .prepare(`SELECT title, user_note, retrieval_caption FROM assets WHERE id = ? LIMIT 1`)
       .get(assetId) as
       | {
           title: string;
@@ -562,6 +788,17 @@ export class VectorSpaceDb {
       .trim();
   }
 
+  public listSearchDocumentSections(assetId: string): Array<{
+    section: string;
+    content: string;
+  }> {
+    return this.db
+      .prepare(
+        'SELECT section, content FROM asset_text_chunks WHERE asset_id = ? ORDER BY chunk_index ASC'
+      )
+      .all(assetId) as Array<{ section: string; content: string }>;
+  }
+
   public listAssetsForSearch(): Array<{
     assetId: string;
     title: string;
@@ -572,10 +809,21 @@ export class VectorSpaceDb {
     status: string;
     mime: string;
     createdAt: string;
+    dominantColors: DominantColorFamily[];
+    orientation: AssetEnrichmentView['orientation'];
+    aspectBucket: AssetEnrichmentView['aspectBucket'];
+    hasText: boolean;
   }> {
     const rows = this.db
       .prepare(
-        `SELECT id as asset_id, title, user_note, retrieval_caption, status, mime, created_at FROM assets`
+        `SELECT a.id as asset_id, a.title, a.user_note, a.retrieval_caption, a.status, a.mime, a.created_at,
+          a.width, a.height,
+          ae.dominant_colors_json,
+          ae.orientation,
+          ae.aspect_bucket,
+          ae.has_text
+        FROM assets a
+        LEFT JOIN asset_enrichments ae ON ae.asset_id = a.id`
       )
       .all() as Array<{
       asset_id: string;
@@ -585,6 +833,12 @@ export class VectorSpaceDb {
       status: string;
       mime: string;
       created_at: string;
+      width: number;
+      height: number;
+      dominant_colors_json: string | null;
+      orientation: AssetEnrichmentView['orientation'] | null;
+      aspect_bucket: AssetEnrichmentView['aspectBucket'] | null;
+      has_text: number | null;
     }>;
 
     return rows.map((row) => ({
@@ -596,7 +850,11 @@ export class VectorSpaceDb {
       collections: this.listCollectionsForAsset(row.asset_id),
       status: row.status,
       mime: row.mime,
-      createdAt: row.created_at
+      createdAt: row.created_at,
+      dominantColors: parseDominantColors(row.dominant_colors_json),
+      orientation: row.orientation ?? deriveOrientation(row.width, row.height),
+      aspectBucket: row.aspect_bucket ?? deriveAspectBucket(row.width, row.height),
+      hasText: Boolean(row.has_text)
     }));
   }
 
@@ -622,6 +880,22 @@ export class VectorSpaceDb {
       .run(collectionId, assetId);
   }
 
+  public attachAssetsToCollection(assetIds: string[], collectionId: string): void {
+    const insert = this.db.prepare(
+      'INSERT OR IGNORE INTO collection_assets(collection_id, asset_id) VALUES (?, ?)'
+    );
+    const tx = this.db.transaction((ids: string[]) => {
+      ids.forEach((assetId) => insert.run(collectionId, assetId));
+    });
+    tx(Array.from(new Set(assetIds)));
+  }
+
+  public detachAssetFromCollection(assetId: string, collectionId: string): void {
+    this.db
+      .prepare('DELETE FROM collection_assets WHERE collection_id = ? AND asset_id = ?')
+      .run(collectionId, assetId);
+  }
+
   public ensureTag(name: string): string {
     const normalized = name.trim().toLowerCase();
     const existing = this.db.prepare('SELECT id FROM tags WHERE name = ?').get(normalized) as
@@ -640,6 +914,20 @@ export class VectorSpaceDb {
     this.db
       .prepare('INSERT OR IGNORE INTO asset_tags(tag_id, asset_id) VALUES (?, ?)')
       .run(tagId, assetId);
+  }
+
+  public attachTagToAssets(assetIds: string[], tagId: string): void {
+    const insert = this.db.prepare(
+      'INSERT OR IGNORE INTO asset_tags(tag_id, asset_id) VALUES (?, ?)'
+    );
+    const tx = this.db.transaction((ids: string[]) => {
+      ids.forEach((assetId) => insert.run(tagId, assetId));
+    });
+    tx(Array.from(new Set(assetIds)));
+  }
+
+  public detachTagFromAsset(assetId: string, tagId: string): void {
+    this.db.prepare('DELETE FROM asset_tags WHERE tag_id = ? AND asset_id = ?').run(tagId, assetId);
   }
 
   public listCollections(): Array<{ id: string; name: string }> {
@@ -666,6 +954,18 @@ export class VectorSpaceDb {
     ).map((entry) => entry.name);
   }
 
+  public listTagEntriesForAsset(assetId: string): AssetTagView[] {
+    return this.db
+      .prepare(
+        `SELECT t.id, t.name
+         FROM tags t
+         INNER JOIN asset_tags at ON at.tag_id = t.id
+         WHERE at.asset_id = ?
+         ORDER BY t.name`
+      )
+      .all(assetId) as AssetTagView[];
+  }
+
   public listCollectionsForAsset(assetId: string): string[] {
     return (
       this.db
@@ -674,6 +974,75 @@ export class VectorSpaceDb {
         )
         .all(assetId) as Array<{ name: string }>
     ).map((entry) => entry.name);
+  }
+
+  public listCollectionEntriesForAsset(assetId: string): AssetCollectionView[] {
+    return this.db
+      .prepare(
+        `SELECT c.id, c.name
+         FROM collections c
+         INNER JOIN collection_assets ca ON ca.collection_id = c.id
+         WHERE ca.asset_id = ?
+         ORDER BY c.name`
+      )
+      .all(assetId) as AssetCollectionView[];
+  }
+
+  public saveSearch(payload: SavedSearchPayload): SavedSearchView {
+    const now = new Date().toISOString();
+    const existing = this.db
+      .prepare('SELECT id, created_at FROM saved_searches WHERE name = ? LIMIT 1')
+      .get(payload.name) as { id: string; created_at: string } | undefined;
+    const id = existing?.id ?? randomUUID();
+    const createdAt = existing?.created_at ?? now;
+
+    this.db
+      .prepare(
+        `INSERT INTO saved_searches(id, name, payload_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           payload_json = excluded.payload_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(id, payload.name, JSON.stringify(payload), createdAt, now);
+
+    return {
+      id,
+      createdAt,
+      updatedAt: now,
+      ...payload
+    };
+  }
+
+  public listSavedSearches(): SavedSearchView[] {
+    const rows = this.db
+      .prepare(
+        'SELECT id, name, payload_json, created_at, updated_at FROM saved_searches ORDER BY updated_at DESC'
+      )
+      .all() as Array<{
+      id: string;
+      name: string;
+      payload_json: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => {
+      const payload = parseJsonRecord(row.payload_json) as Partial<SavedSearchPayload>;
+      return {
+        id: row.id,
+        name: row.name,
+        searchText: typeof payload.searchText === 'string' ? payload.searchText : '',
+        searchMode: payload.searchMode === 'similar-image' ? 'similar-image' : 'semantic',
+        filters: (payload.filters as SavedSearchPayload['filters']) ?? {},
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      };
+    });
+  }
+
+  public deleteSavedSearch(savedSearchId: string): void {
+    this.db.prepare('DELETE FROM saved_searches WHERE id = ?').run(savedSearchId);
   }
 
   public listIndexJobs(): IndexJobView[] {

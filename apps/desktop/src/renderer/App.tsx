@@ -1,4 +1,16 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import type {
+  AppAssetView,
+  AssetCollectionView,
+  AssetDetailView,
+  AssetTagView,
+  SavedSearchPayload,
+  SavedSearchView,
+  SearchExplanation,
+  SearchFilters,
+  SearchResult
+} from '../shared/contracts';
+import { formatColorFamilyLabel, formatImportSourceLabel } from '../shared/assetMetadata';
 import { GEMINI_EMBEDDING_MODEL, getGeminiApiSettings } from '../shared/gemini';
 import {
   getAdjacentViewerAssetId,
@@ -14,20 +26,9 @@ import {
   MAX_GRID_COLUMNS,
   MIN_GRID_COLUMNS
 } from './gridControls';
+import { assetMatchesFilters, deriveSavedSearchName, toggleStringFilter } from './libraryFilters';
 
-type Asset = {
-  id: string;
-  createdAt: string;
-  mime: string;
-  width: number;
-  height: number;
-  status: 'imported' | 'indexing' | 'ready' | 'failed';
-  thumbnailPath: string | null;
-  thumbnailUpdatedAt: string | null;
-  originalPath: string;
-  tags: string[];
-  collections: string[];
-};
+type Asset = AppAssetView;
 
 type VectorSpaceApi = Window['vectorSpace'];
 
@@ -39,11 +40,25 @@ type Job = {
   updatedAt: string;
 };
 
+type BatchMode = 'tag' | 'collection' | null;
+
 const statusLabel: Record<Asset['status'], string> = {
   imported: 'Imported',
   indexing: 'Indexing',
   ready: 'Ready',
   failed: 'Failed'
+};
+
+const DEFAULT_FILTERS: SearchFilters = {
+  mimePrefix: '',
+  status: 'all',
+  collectionNames: [],
+  tagNames: [],
+  orientation: 'all',
+  aspectBuckets: [],
+  dominantColors: [],
+  hasText: null,
+  onlyOfflineReady: false
 };
 
 const parseErrorMessage = (error: unknown): string => {
@@ -54,7 +69,7 @@ const parseErrorMessage = (error: unknown): string => {
   return 'Unexpected error';
 };
 
-const formatAssetLabel = (asset: Asset | null) => {
+const formatAssetLabel = (asset: Pick<Asset, 'originalPath' | 'id'> | null) => {
   if (!asset) {
     return 'Unknown asset';
   }
@@ -125,6 +140,19 @@ const createPreviewThumb = (label: string, color: string): string => {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 };
 
+const buildPreviewExplanation = (assetId: string): SearchExplanation => ({
+  vectorScore: assetId.endsWith('1') ? 0.92 : 0.67,
+  lexicalScore: assetId.endsWith('1') ? 0.28 : 0.14,
+  metadataScore: 0.22,
+  recencyBoost: 0.02,
+  matchedFields: ['title', 'search document'],
+  matchedTerms: ['dashboard', 'editorial'],
+  matchedTags: ['demo'],
+  matchedCollections: ['showcase'],
+  matchedColors: ['blue'],
+  snippet: 'Demo snippet showing how the search document and metadata will surface in the UI.'
+});
+
 const createPreviewApi = (): VectorSpaceApi => {
   const demoAssets: Asset[] = Array.from({ length: 48 }, (_, index) => {
     const palette = previewPalettes[index % previewPalettes.length];
@@ -132,10 +160,22 @@ const createPreviewApi = (): VectorSpaceApi => {
     const width = [1024, 1280, 960, 1440, 800, 1080][index % 6];
     const height = [1024, 720, 1280, 900, 1200, 1080][index % 6];
     const status: Asset['status'] = index % 11 === 0 ? 'indexing' : 'ready';
+    const orientation = width === height ? 'square' : width > height ? 'landscape' : 'portrait';
+    const aspectBucket =
+      width === height
+        ? 'square'
+        : width / height >= 1.4
+          ? 'wide'
+          : width / height <= 0.6
+            ? 'tall'
+            : width > height
+              ? 'standard'
+              : 'portrait';
 
     return {
       id: `demo-${sequence}`,
       createdAt: new Date(Date.now() - index * 3_600_000).toISOString(),
+      importSource: index % 4 === 0 ? 'clipboard' : 'folder',
       mime: 'image/png',
       width,
       height,
@@ -143,14 +183,84 @@ const createPreviewApi = (): VectorSpaceApi => {
       thumbnailPath: createPreviewThumb(`DEMO ${index + 1}`, palette),
       thumbnailUpdatedAt: new Date(Date.now() - index * 3_600_000).toISOString(),
       originalPath: `/demo/color-study-${sequence}.png`,
-      tags: index % 2 === 0 ? ['color'] : ['demo'],
-      collections: index % 3 === 0 ? ['showcase'] : ['seed']
+      title: `Color Study ${index + 1}`,
+      userNote: index % 3 === 0 ? 'High-contrast composition with visible text treatment.' : '',
+      retrievalCaption: 'Color study. Demo metadata-rich archive asset.',
+      tags: index % 2 === 0 ? ['color', 'demo'] : ['demo'],
+      collections: index % 3 === 0 ? ['showcase'] : ['seed'],
+      dominantColors: ['blue', 'orange'],
+      orientation,
+      aspectBucket,
+      hasText: index % 3 === 0
     };
   });
+
+  const tags: AssetTagView[] = [
+    { id: 'tag-color', name: 'color' },
+    { id: 'tag-demo', name: 'demo' },
+    { id: 'tag-editorial', name: 'editorial' }
+  ];
+  const collections: AssetCollectionView[] = [
+    { id: 'col-showcase', name: 'showcase' },
+    { id: 'col-seed', name: 'seed' },
+    { id: 'col-archive', name: 'archive' }
+  ];
+
+  const detailMap = new Map<string, AssetDetailView>(
+    demoAssets.map((asset) => [
+      asset.id,
+      {
+        ...asset,
+        checksum: asset.id,
+        sourcePath: asset.originalPath,
+        metadata: {
+          sourceType: 'preview',
+          aspectRatio: Number((asset.width / asset.height).toFixed(3))
+        },
+        searchDocument: `${asset.title}\n${asset.retrievalCaption}\n${asset.tags.join(' ')}\n${asset.collections.join(' ')}`,
+        searchDocumentSections: [
+          { section: 'summary', content: asset.retrievalCaption },
+          { section: 'organization', content: [...asset.tags, ...asset.collections].join(' ') }
+        ],
+        tagEntries: asset.tags.map(
+          (name) => tags.find((tag) => tag.name === name) ?? { id: name, name }
+        ),
+        collectionEntries: asset.collections.map(
+          (name) => collections.find((collection) => collection.name === name) ?? { id: name, name }
+        ),
+        enrichment: {
+          ocrText: asset.hasText ? 'Preview OCR text' : '',
+          dominantColors: asset.dominantColors,
+          orientation: asset.orientation,
+          aspectBucket: asset.aspectBucket,
+          hasText: asset.hasText,
+          exif: {},
+          extractionVersion: 2,
+          updatedAt: asset.createdAt
+        }
+      }
+    ])
+  );
+
+  const savedSearches: SavedSearchView[] = [
+    {
+      id: 'saved-1',
+      name: 'Demo editorial',
+      searchText: 'editorial typography',
+      searchMode: 'semantic',
+      filters: {
+        ...DEFAULT_FILTERS,
+        tagNames: ['demo']
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+  ];
 
   return {
     appName: 'Vector Space Library (Preview Mode)',
     listAssets: async () => demoAssets,
+    getAssetDetail: async (assetId: string) => detailMap.get(assetId) ?? null,
     listJobs: async () => [
       {
         assetId: 'demo-0001',
@@ -174,14 +284,9 @@ const createPreviewApi = (): VectorSpaceApi => {
         updatedAt: new Date(Date.now() - 300_000).toISOString()
       }
     ],
-    listTags: async () => [
-      { id: 'tag-color', name: 'color' },
-      { id: 'tag-demo', name: 'demo' }
-    ],
-    listCollections: async () => [
-      { id: 'col-showcase', name: 'showcase' },
-      { id: 'col-seed', name: 'seed' }
-    ],
+    listTags: async () => tags,
+    listCollections: async () => collections,
+    listSavedSearches: async () => savedSearches,
     importFiles: async () => ({ imported: 0, skipped: 0 }),
     importFolder: async () => ({ imported: 0, skipped: 0 }),
     importClipboard: async () => ({ imported: 0, skipped: 0 }),
@@ -192,12 +297,48 @@ const createPreviewApi = (): VectorSpaceApi => {
     createTag: async () => ({ id: 'preview-tag' }),
     attachCollection: async () => ({ ok: true }),
     attachTag: async () => ({ ok: true }),
+    detachCollection: async () => ({ ok: true }),
+    detachTag: async () => ({ ok: true }),
+    batchAssignTags: async () => ({ ok: true }),
+    batchAssignCollections: async () => ({ ok: true }),
+    updateAssetMetadata: async (assetId: string, payload: { title: string; userNote: string }) => {
+      const detail = detailMap.get(assetId) ?? null;
+      if (!detail) {
+        return null;
+      }
+
+      detail.title = payload.title;
+      detail.userNote = payload.userNote;
+      detail.searchDocument = [detail.title, detail.userNote, detail.retrievalCaption]
+        .join('\n')
+        .trim();
+      return detail;
+    },
     pauseIndexing: async () => ({ ok: true }),
     resumeIndexing: async () => ({ ok: true }),
     reindex: async () => ({ ok: true }),
     retryAssets: async () => ({ ok: true }),
-    searchText: async () => [],
-    searchImage: async () => [],
+    searchText: async () =>
+      demoAssets.slice(0, 8).map((asset, index) => ({
+        assetId: asset.id,
+        score: 0.94 - index * 0.04,
+        reasons: ['joint similarity', 'lexical/OCR-style text match', 'matching tags'],
+        explanation: buildPreviewExplanation(asset.id)
+      })),
+    searchImage: async () =>
+      demoAssets.slice(0, 8).map((asset, index) => ({
+        assetId: asset.id,
+        score: 0.98 - index * 0.05,
+        reasons: ['visual similarity', 'matching color filter'],
+        explanation: buildPreviewExplanation(asset.id)
+      })),
+    saveSearch: async (payload: SavedSearchPayload) => ({
+      id: `saved-${savedSearches.length + 1}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      ...payload
+    }),
+    deleteSavedSearch: async () => ({ ok: true }),
     getNetworkState: async () => ({ online: true }),
     setNetworkState: async (nextOnline: boolean) => ({ online: nextOnline }),
     getApiSettings: async () => getGeminiApiSettings(true),
@@ -221,36 +362,61 @@ const getRendererApi = (): VectorSpaceApi => {
   return createPreviewApi();
 };
 
+const formatExplanationSummary = (explanation: SearchExplanation): string[] => {
+  const summary: string[] = [];
+  if (explanation.matchedFields.length > 0) {
+    summary.push(`fields: ${explanation.matchedFields.join(', ')}`);
+  }
+  if (explanation.matchedTags.length > 0) {
+    summary.push(`tags: ${explanation.matchedTags.join(', ')}`);
+  }
+  if (explanation.matchedCollections.length > 0) {
+    summary.push(`collections: ${explanation.matchedCollections.join(', ')}`);
+  }
+  if (explanation.matchedTerms.length > 0) {
+    summary.push(`terms: ${explanation.matchedTerms.join(', ')}`);
+  }
+  return summary;
+};
+
 export const App = () => {
   const api = useMemo(() => getRendererApi(), []);
+  const batchBarRef = useRef<HTMLDivElement | null>(null);
+  const apiHasBridge = Boolean((window as Window & { vectorSpace?: VectorSpaceApi }).vectorSpace);
+
   const [assets, setAssets] = useState<Asset[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [savedSearches, setSavedSearches] = useState<SavedSearchView[]>([]);
   const [search, setSearch] = useState('');
   const [searchMode, setSearchMode] = useState<'semantic' | 'similar-image'>('semantic');
-  const [searchResults, setSearchResults] = useState<
-    Record<string, { score: number; reasons: string[] }>
-  >({});
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [searchResults, setSearchResults] = useState<Record<string, SearchResult>>({});
+  const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
+  const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [message, setMessage] = useState('Ready');
   const [busy, setBusy] = useState(false);
-  const [tags, setTags] = useState<Array<{ id: string; name: string }>>([]);
-  const [collections, setCollections] = useState<Array<{ id: string; name: string }>>([]);
-  const [tagInput, setTagInput] = useState('');
-  const [collectionInput, setCollectionInput] = useState('');
-  const [mimeFilter, setMimeFilter] = useState('');
+  const [tags, setTags] = useState<AssetTagView[]>([]);
+  const [collections, setCollections] = useState<AssetCollectionView[]>([]);
+  const [filters, setFilters] = useState<SearchFilters>(DEFAULT_FILTERS);
   const [online, setOnline] = useState(true);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [hasApiKey, setHasApiKey] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showJobs, setShowJobs] = useState(false);
   const [viewerAssetId, setViewerAssetId] = useState<string | null>(null);
+  const [viewerDetail, setViewerDetail] = useState<AssetDetailView | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [noteDraft, setNoteDraft] = useState('');
+  const [viewerTagInput, setViewerTagInput] = useState('');
+  const [viewerCollectionInput, setViewerCollectionInput] = useState('');
+  const [batchMode, setBatchMode] = useState<BatchMode>(null);
+  const [batchTagInput, setBatchTagInput] = useState('');
+  const [batchCollectionInput, setBatchCollectionInput] = useState('');
+  const [batchTagId, setBatchTagId] = useState('');
+  const [batchCollectionId, setBatchCollectionId] = useState('');
+  const [savedSearchName, setSavedSearchName] = useState('');
   const [apiModel, setApiModel] = useState<string>(GEMINI_EMBEDDING_MODEL);
   const [gridColumns, setGridColumns] = useState(DEFAULT_GRID_COLUMNS);
-
-  const selectedAsset = useMemo(
-    () => assets.find((asset) => asset.id === selectedAssetId) ?? null,
-    [assets, selectedAssetId]
-  );
 
   const runAction = useCallback(async (label: string, action: () => Promise<void>) => {
     setBusy(true);
@@ -264,24 +430,48 @@ export const App = () => {
   }, []);
 
   const refresh = useCallback(async () => {
-    const [assetRows, jobRows, tagRows, collectionRows, networkState, apiSettings] =
+    const [assetRows, jobRows, tagRows, collectionRows, savedRows, networkState, apiSettings] =
       await Promise.all([
         api.listAssets(),
         api.listJobs(),
         api.listTags(),
         api.listCollections(),
+        api.listSavedSearches(),
         api.getNetworkState(),
         api.getApiSettings()
       ]);
 
-    setAssets(assetRows as Asset[]);
+    setAssets(assetRows);
     setJobs(jobRows as Job[]);
     setTags(tagRows);
     setCollections(collectionRows);
+    setSavedSearches(savedRows);
     setOnline(networkState.online);
     setHasApiKey(apiSettings.hasApiKey);
     setApiModel(apiSettings.model);
   }, [api]);
+
+  const loadAssetDetail = useCallback(
+    async (assetId: string | null) => {
+      if (!assetId) {
+        setViewerDetail(null);
+        setTitleDraft('');
+        setNoteDraft('');
+        return;
+      }
+
+      setDetailLoading(true);
+      try {
+        const detail = await api.getAssetDetail(assetId);
+        setViewerDetail(detail);
+        setTitleDraft(detail?.title ?? '');
+        setNoteDraft(detail?.userNote ?? '');
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [api]
+  );
 
   useEffect(() => {
     void runAction('Refresh', async () => {
@@ -315,6 +505,18 @@ export const App = () => {
       document.removeEventListener('paste', onPaste);
     };
   }, [api, refresh, runAction]);
+
+  useEffect(() => {
+    if (viewerAssetId) {
+      void loadAssetDetail(viewerAssetId);
+    }
+  }, [loadAssetDetail, viewerAssetId]);
+
+  useEffect(() => {
+    if (batchMode && batchBarRef.current) {
+      batchBarRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [batchMode, selectedAssetIds.length]);
 
   const onImportFiles = async () => {
     await runAction('File import', async () => {
@@ -351,33 +553,59 @@ export const App = () => {
     });
   };
 
-  const runSearch = async () => {
-    await runAction('Search', async () => {
-      if (!search.trim()) {
+  const executeSearch = useCallback(
+    async (query: string, nextMode: 'semantic' | 'similar-image', nextFilters: SearchFilters) => {
+      if (!query.trim()) {
         setSearchResults({});
         setMessage('Search cleared');
         return;
       }
 
       const rows =
-        searchMode === 'semantic' ? await api.searchText(search) : await api.searchImage(search);
+        nextMode === 'semantic'
+          ? await api.searchText(query, nextFilters)
+          : await api.searchImage(query, '', nextFilters);
 
-      const mapped: Record<string, { score: number; reasons: string[] }> = {};
-      rows.forEach((row: { assetId: string; score: number; reasons: string[] }) => {
-        mapped[row.assetId] = { score: row.score, reasons: row.reasons };
+      const mapped: Record<string, SearchResult> = {};
+      rows.forEach((row) => {
+        mapped[row.assetId] = row;
       });
 
       setSearchResults(mapped);
       setMessage(`Search returned ${rows.length} results`);
+    },
+    [api]
+  );
+
+  const runSearch = async () => {
+    await runAction('Search', async () => {
+      await executeSearch(search, searchMode, filters);
     });
   };
 
-  const filteredAssets = useMemo(() => {
-    let working = [...assets];
-
-    if (mimeFilter) {
-      working = working.filter((asset) => asset.mime.includes(mimeFilter));
+  const applyFilters = (nextFilters: SearchFilters) => {
+    setFilters(nextFilters);
+    if (search.trim()) {
+      void runAction('Search refresh', async () => {
+        await executeSearch(search, searchMode, nextFilters);
+      });
     }
+  };
+
+  const availableMimeOptions = useMemo(
+    () => ['', ...Array.from(new Set(assets.map((asset) => asset.mime))).sort()],
+    [assets]
+  );
+  const availableColors = useMemo(
+    () =>
+      Array.from(new Set(assets.flatMap((asset) => asset.dominantColors)))
+        .filter(Boolean)
+        .sort(),
+    [assets]
+  );
+
+  const filteredAssets = useMemo(() => {
+    let working = assets.filter((asset) => assetMatchesFilters(asset, filters));
 
     if (Object.keys(searchResults).length > 0) {
       working = working
@@ -386,25 +614,26 @@ export const App = () => {
     }
 
     return working;
-  }, [assets, mimeFilter, searchResults]);
+  }, [assets, filters, searchResults]);
 
   const assetMap = useMemo(() => new Map(assets.map((asset) => [asset.id, asset])), [assets]);
-
+  const selectedAssetIdSet = useMemo(() => new Set(selectedAssetIds), [selectedAssetIds]);
   const viewerAsset = useMemo(
-    () => (viewerAssetId ? assetMap.get(viewerAssetId) ?? null : null),
+    () => (viewerAssetId ? (assetMap.get(viewerAssetId) ?? null) : null),
     [assetMap, viewerAssetId]
   );
-
   const viewerIndex = useMemo(
     () => getViewerAssetIndex(viewerAssetId, filteredAssets),
     [filteredAssets, viewerAssetId]
   );
-
-  const canViewPreviousAsset = viewerIndex > 0;
-  const canViewNextAsset = viewerIndex !== -1 && viewerIndex < filteredAssets.length - 1;
+  const focusedAsset = useMemo(
+    () => (focusedAssetId ? (assetMap.get(focusedAssetId) ?? null) : null),
+    [assetMap, focusedAssetId]
+  );
 
   const openAssetViewer = useCallback((assetId: string) => {
-    setSelectedAssetId(assetId);
+    setFocusedAssetId(assetId);
+    setSelectedAssetIds([assetId]);
     setViewerAssetId(assetId);
   }, []);
 
@@ -419,114 +648,15 @@ export const App = () => {
         return;
       }
 
-      setSelectedAssetId(nextAssetId);
+      setFocusedAssetId(nextAssetId);
+      setSelectedAssetIds([nextAssetId]);
       setViewerAssetId(nextAssetId);
     },
     [filteredAssets, viewerAssetId]
   );
 
-  const saveApiKey = async () => {
-    await runAction('API key save', async () => {
-      if (!apiKeyInput.trim()) {
-        setMessage('Enter an API key first');
-        return;
-      }
-
-      const response = await api.setApiKey(apiKeyInput.trim());
-      setHasApiKey(response.hasApiKey);
-      setApiKeyInput('');
-      setMessage('Gemini API key saved to macOS Keychain');
-      await refresh();
-    });
-  };
-
-  const clearApiKey = async () => {
-    await runAction('API key clear', async () => {
-      await api.clearApiKey();
-      setHasApiKey(false);
-      setMessage('Gemini API key removed from macOS Keychain');
-    });
-  };
-
-  const attachTag = async (tagId: string) => {
-    if (!selectedAsset) return;
-    await api.attachTag(selectedAsset.id, tagId);
-    await refresh();
-  };
-
-  const attachCollection = async (collectionId: string) => {
-    if (!selectedAsset) return;
-    await api.attachCollection(selectedAsset.id, collectionId);
-    await refresh();
-  };
-
-  const retryAssets = async (assetIds: string[], label: string) => {
-    await runAction(label, async () => {
-      const uniqueAssetIds = Array.from(new Set(assetIds));
-      if (uniqueAssetIds.length === 0) {
-        setMessage('Nothing to retry');
-        return;
-      }
-
-      await api.retryAssets(uniqueAssetIds);
-      setMessage(
-        uniqueAssetIds.length === 1
-          ? 'Asset requeued for indexing'
-          : `Requeued ${uniqueAssetIds.length} assets for indexing`
-      );
-      await refresh();
-    });
-  };
-
-  const activeJobs = useMemo(
-    () => jobs.filter((job) => job.status === 'running' || job.status === 'queued'),
-    [jobs]
-  );
-  const failedJobs = useMemo(() => jobs.filter((job) => job.status === 'failed'), [jobs]);
-  const recentSuccessfulJobs = useMemo(
-    () => jobs.filter((job) => job.status === 'success').slice(0, 6),
-    [jobs]
-  );
-
-  const runningJobs = activeJobs.length;
-  const failedJobCount = failedJobs.length;
-  const jobPillLabel =
-    runningJobs > 0
-      ? `Queue ${runningJobs} active${failedJobCount > 0 ? ` · ${failedJobCount} failed` : ''}`
-      : failedJobCount > 0
-        ? `Queue idle · ${failedJobCount} failed`
-        : 'Queue idle';
-
-  const gridStyle = useMemo(
-    () =>
-      ({
-        gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`
-      }) as CSSProperties,
-    [gridColumns]
-  );
-
-  const handleGridColumnsChange = (value: string) => {
-    setGridColumns(clampGridColumns(Number(value)));
-  };
-
-  const getAssetImageSrc = (asset: Asset) => {
-    return buildThumbnailSrc(asset);
-  };
-
-  const getAssetOriginalSrc = (asset: Asset) => {
-    if (asset.originalPath.startsWith('data:')) {
-      return asset.originalPath;
-    }
-
-    const maybePreviewFallback = asset.thumbnailPath?.startsWith('data:') ? asset.thumbnailPath : null;
-    const hasRendererApi = Boolean((window as Window & { vectorSpace?: VectorSpaceApi }).vectorSpace);
-
-    if (!hasRendererApi && maybePreviewFallback) {
-      return maybePreviewFallback;
-    }
-
-    return buildLibraryAssetUrl(asset.originalPath);
-  };
+  const canViewPreviousAsset = viewerIndex > 0;
+  const canViewNextAsset = viewerIndex !== -1 && viewerIndex < filteredAssets.length - 1;
 
   useEffect(() => {
     if (!viewerAssetId) {
@@ -571,6 +701,268 @@ export const App = () => {
     };
   }, [closeAssetViewer, navigateViewer, viewerAssetId]);
 
+  const selectExclusive = (assetId: string) => {
+    setFocusedAssetId(assetId);
+    setSelectedAssetIds([assetId]);
+  };
+
+  const toggleAssetSelection = (assetId: string) => {
+    setFocusedAssetId(assetId);
+    setSelectedAssetIds((current) =>
+      current.includes(assetId)
+        ? current.filter((currentId) => currentId !== assetId)
+        : [...current, assetId]
+    );
+  };
+
+  const queueBatchMode = (mode: Exclude<BatchMode, null>, assetId: string) => {
+    selectExclusive(assetId);
+    setBatchMode(mode);
+  };
+
+  const refreshAfterMutation = async (assetIds: string[] = []) => {
+    await refresh();
+    if (viewerAssetId && assetIds.includes(viewerAssetId)) {
+      await loadAssetDetail(viewerAssetId);
+    }
+  };
+
+  const saveAssetMetadata = async () => {
+    if (!viewerAsset) {
+      return;
+    }
+
+    await runAction('Save asset metadata', async () => {
+      const detail = await api.updateAssetMetadata(viewerAsset.id, {
+        title: titleDraft,
+        userNote: noteDraft
+      });
+      setViewerDetail(detail);
+      setMessage('Asset metadata saved');
+      await refresh();
+    });
+  };
+
+  const attachTag = async (assetId: string, tagId: string) => {
+    await api.attachTag(assetId, tagId);
+    await refreshAfterMutation([assetId]);
+  };
+
+  const detachTag = async (assetId: string, tagId: string) => {
+    await api.detachTag(assetId, tagId);
+    await refreshAfterMutation([assetId]);
+  };
+
+  const attachCollection = async (assetId: string, collectionId: string) => {
+    await api.attachCollection(assetId, collectionId);
+    await refreshAfterMutation([assetId]);
+  };
+
+  const detachCollection = async (assetId: string, collectionId: string) => {
+    await api.detachCollection(assetId, collectionId);
+    await refreshAfterMutation([assetId]);
+  };
+
+  const createAndAttachViewerTag = async () => {
+    if (!viewerAsset || !viewerTagInput.trim()) {
+      setMessage('Tag name cannot be empty');
+      return;
+    }
+
+    await runAction('Add tag', async () => {
+      const response = await api.createTag(viewerTagInput.trim());
+      await attachTag(viewerAsset.id, response.id);
+      setViewerTagInput('');
+      setMessage('Tag attached');
+    });
+  };
+
+  const createAndAttachViewerCollection = async () => {
+    if (!viewerAsset || !viewerCollectionInput.trim()) {
+      setMessage('Collection name cannot be empty');
+      return;
+    }
+
+    await runAction('Add collection', async () => {
+      const response = await api.createCollection(viewerCollectionInput.trim());
+      await attachCollection(viewerAsset.id, response.id);
+      setViewerCollectionInput('');
+      setMessage('Collection attached');
+    });
+  };
+
+  const applyBatchTag = async () => {
+    if (selectedAssetIds.length === 0) {
+      setMessage('Select assets first');
+      return;
+    }
+
+    await runAction('Batch tag', async () => {
+      let tagId = batchTagId;
+      if (!tagId && batchTagInput.trim()) {
+        const response = await api.createTag(batchTagInput.trim());
+        tagId = response.id;
+      }
+
+      if (!tagId) {
+        setMessage('Choose or create a tag');
+        return;
+      }
+
+      await api.batchAssignTags(selectedAssetIds, tagId);
+      setBatchTagId('');
+      setBatchTagInput('');
+      setMessage(`Tagged ${selectedAssetIds.length} assets`);
+      await refreshAfterMutation(selectedAssetIds);
+    });
+  };
+
+  const applyBatchCollection = async () => {
+    if (selectedAssetIds.length === 0) {
+      setMessage('Select assets first');
+      return;
+    }
+
+    await runAction('Batch collection', async () => {
+      let collectionId = batchCollectionId;
+      if (!collectionId && batchCollectionInput.trim()) {
+        const response = await api.createCollection(batchCollectionInput.trim());
+        collectionId = response.id;
+      }
+
+      if (!collectionId) {
+        setMessage('Choose or create a collection');
+        return;
+      }
+
+      await api.batchAssignCollections(selectedAssetIds, collectionId);
+      setBatchCollectionId('');
+      setBatchCollectionInput('');
+      setMessage(`Added ${selectedAssetIds.length} assets to a collection`);
+      await refreshAfterMutation(selectedAssetIds);
+    });
+  };
+
+  const retryAssets = async (assetIds: string[], label: string) => {
+    await runAction(label, async () => {
+      const uniqueAssetIds = Array.from(new Set(assetIds));
+      if (uniqueAssetIds.length === 0) {
+        setMessage('Nothing to retry');
+        return;
+      }
+
+      await api.retryAssets(uniqueAssetIds);
+      setMessage(
+        uniqueAssetIds.length === 1
+          ? 'Asset requeued for indexing'
+          : `Requeued ${uniqueAssetIds.length} assets for indexing`
+      );
+      await refresh();
+    });
+  };
+
+  const saveCurrentSearch = async () => {
+    await runAction('Save search', async () => {
+      const payload: SavedSearchPayload = {
+        name: savedSearchName.trim() || deriveSavedSearchName(search, savedSearches.length + 1),
+        searchText: search,
+        searchMode,
+        filters
+      };
+      await api.saveSearch(payload);
+      setSavedSearchName('');
+      setMessage(`Saved "${payload.name}"`);
+      await refresh();
+    });
+  };
+
+  const applySavedSearch = (savedSearch: SavedSearchView) => {
+    setSearch(savedSearch.searchText);
+    setSearchMode(savedSearch.searchMode);
+    setFilters(savedSearch.filters);
+    if (savedSearch.searchText.trim()) {
+      void runAction('Apply saved search', async () => {
+        await executeSearch(savedSearch.searchText, savedSearch.searchMode, savedSearch.filters);
+      });
+    } else {
+      setSearchResults({});
+    }
+  };
+
+  const deleteSavedSearch = async (savedSearchId: string) => {
+    await runAction('Delete saved search', async () => {
+      await api.deleteSavedSearch(savedSearchId);
+      await refresh();
+      setMessage('Saved search removed');
+    });
+  };
+
+  const saveApiKey = async () => {
+    await runAction('API key save', async () => {
+      if (!apiKeyInput.trim()) {
+        setMessage('Enter an API key first');
+        return;
+      }
+
+      const response = await api.setApiKey(apiKeyInput.trim());
+      setHasApiKey(response.hasApiKey);
+      setApiKeyInput('');
+      setMessage('Gemini API key saved to macOS Keychain');
+      await refresh();
+    });
+  };
+
+  const clearApiKey = async () => {
+    await runAction('API key clear', async () => {
+      await api.clearApiKey();
+      setHasApiKey(false);
+      setMessage('Gemini API key removed from macOS Keychain');
+    });
+  };
+
+  const activeJobs = useMemo(
+    () => jobs.filter((job) => job.status === 'running' || job.status === 'queued'),
+    [jobs]
+  );
+  const failedJobs = useMemo(() => jobs.filter((job) => job.status === 'failed'), [jobs]);
+  const recentSuccessfulJobs = useMemo(
+    () => jobs.filter((job) => job.status === 'success').slice(0, 6),
+    [jobs]
+  );
+  const runningJobs = activeJobs.length;
+  const failedJobCount = failedJobs.length;
+  const jobPillLabel =
+    runningJobs > 0
+      ? `Queue ${runningJobs} active${failedJobCount > 0 ? ` · ${failedJobCount} failed` : ''}`
+      : failedJobCount > 0
+        ? `Queue idle · ${failedJobCount} failed`
+        : 'Queue idle';
+
+  const gridStyle = useMemo(
+    () =>
+      ({
+        gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`
+      }) as CSSProperties,
+    [gridColumns]
+  );
+
+  const getAssetImageSrc = (asset: Asset) => buildThumbnailSrc(asset);
+
+  const getAssetOriginalSrc = (asset: Asset) => {
+    if (asset.originalPath.startsWith('data:')) {
+      return asset.originalPath;
+    }
+
+    const maybePreviewFallback = asset.thumbnailPath?.startsWith('data:')
+      ? asset.thumbnailPath
+      : null;
+    if (!apiHasBridge && maybePreviewFallback) {
+      return maybePreviewFallback;
+    }
+
+    return buildLibraryAssetUrl(asset.originalPath);
+  };
+
   return (
     <main className="app-shell" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
       <header className="app-header">
@@ -589,8 +981,10 @@ export const App = () => {
               max={MAX_GRID_COLUMNS}
               step={1}
               value={gridColumns}
-              onInput={(event) => handleGridColumnsChange(event.currentTarget.value)}
-              onChange={(event) => handleGridColumnsChange(event.target.value)}
+              onInput={(event) =>
+                setGridColumns(clampGridColumns(Number(event.currentTarget.value)))
+              }
+              onChange={(event) => setGridColumns(clampGridColumns(Number(event.target.value)))}
               aria-label="Grid columns"
             />
             <output htmlFor="grid-size-slider">{formatGridColumnsLabel(gridColumns)}</output>
@@ -652,41 +1046,324 @@ export const App = () => {
             />
             <select
               value={searchMode}
-              onChange={(event) => setSearchMode(event.target.value as 'semantic' | 'similar-image')}
+              onChange={(event) =>
+                setSearchMode(event.target.value as 'semantic' | 'similar-image')
+              }
               disabled={busy}
             >
               <option value="semantic">Semantic</option>
               <option value="similar-image">Similar Image</option>
             </select>
-            <input
-              placeholder="Filter mime (ex image/)"
-              value={mimeFilter}
-              onChange={(event) => setMimeFilter(event.target.value)}
-              disabled={busy}
-            />
             <button onClick={runSearch} disabled={busy || !hasApiKey}>
               Search
+            </button>
+            <button
+              onClick={() => {
+                setSearch('');
+                setSearchResults({});
+                setMessage('Search cleared');
+              }}
+              disabled={busy}
+            >
+              Clear
             </button>
           </div>
         </div>
       </section>
+
+      <section className="filter-strip panel">
+        <div className="saved-search-row">
+          <div className="saved-search-list">
+            {savedSearches.map((savedSearch) => (
+              <button
+                key={savedSearch.id}
+                className="saved-search-chip"
+                onClick={() => applySavedSearch(savedSearch)}
+                disabled={busy}
+              >
+                <span>{savedSearch.name}</span>
+                <span
+                  className="saved-search-delete"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void deleteSavedSearch(savedSearch.id);
+                  }}
+                >
+                  ×
+                </span>
+              </button>
+            ))}
+          </div>
+          <div className="saved-search-actions">
+            <input
+              value={savedSearchName}
+              onChange={(event) => setSavedSearchName(event.target.value)}
+              placeholder="Save current view"
+              disabled={busy}
+            />
+            <button onClick={saveCurrentSearch} disabled={busy}>
+              Save Search
+            </button>
+          </div>
+        </div>
+
+        <div className="filter-groups">
+          <div className="filter-group">
+            <span className="filter-label">Status</span>
+            {(['all', 'ready', 'failed', 'indexing', 'imported'] as const).map((status) => (
+              <button
+                key={status}
+                className={`filter-chip ${filters.status === status ? 'filter-chip-active' : ''}`}
+                onClick={() => applyFilters({ ...filters, status })}
+                disabled={busy}
+              >
+                {status === 'all' ? 'All' : statusLabel[status]}
+              </button>
+            ))}
+          </div>
+
+          <div className="filter-group">
+            <span className="filter-label">Type</span>
+            {availableMimeOptions.map((mimePrefix) => (
+              <button
+                key={mimePrefix || 'all-mimes'}
+                className={`filter-chip ${filters.mimePrefix === mimePrefix ? 'filter-chip-active' : ''}`}
+                onClick={() => applyFilters({ ...filters, mimePrefix })}
+                disabled={busy}
+              >
+                {mimePrefix ? mimePrefix.replace('image/', '').toUpperCase() : 'All'}
+              </button>
+            ))}
+          </div>
+
+          <div className="filter-group">
+            <span className="filter-label">Orientation</span>
+            {(['all', 'landscape', 'portrait', 'square'] as const).map((orientation) => (
+              <button
+                key={orientation}
+                className={`filter-chip ${filters.orientation === orientation ? 'filter-chip-active' : ''}`}
+                onClick={() => applyFilters({ ...filters, orientation })}
+                disabled={busy}
+              >
+                {orientation === 'all' ? 'Any' : orientation}
+              </button>
+            ))}
+          </div>
+
+          <div className="filter-group">
+            <span className="filter-label">Text</span>
+            {[
+              { label: 'Any', value: null },
+              { label: 'Has text', value: true },
+              { label: 'No text', value: false }
+            ].map((entry) => (
+              <button
+                key={entry.label}
+                className={`filter-chip ${filters.hasText === entry.value ? 'filter-chip-active' : ''}`}
+                onClick={() => applyFilters({ ...filters, hasText: entry.value })}
+                disabled={busy}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+
+          {availableColors.length > 0 ? (
+            <div className="filter-group">
+              <span className="filter-label">Colors</span>
+              {availableColors.map((color) => (
+                <button
+                  key={color}
+                  className={`filter-chip ${
+                    filters.dominantColors?.includes(color) ? 'filter-chip-active' : ''
+                  }`}
+                  onClick={() =>
+                    applyFilters({
+                      ...filters,
+                      dominantColors: toggleStringFilter(
+                        filters.dominantColors ?? [],
+                        color
+                      ) as Asset['dominantColors']
+                    })
+                  }
+                  disabled={busy}
+                >
+                  {formatColorFamilyLabel(color)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {tags.length > 0 ? (
+            <div className="filter-group filter-group-wide">
+              <span className="filter-label">Tags</span>
+              {tags.map((tag) => (
+                <button
+                  key={tag.id}
+                  className={`filter-chip ${filters.tagNames?.includes(tag.name) ? 'filter-chip-active' : ''}`}
+                  onClick={() =>
+                    applyFilters({
+                      ...filters,
+                      tagNames: toggleStringFilter(filters.tagNames ?? [], tag.name)
+                    })
+                  }
+                  disabled={busy}
+                >
+                  {tag.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {collections.length > 0 ? (
+            <div className="filter-group filter-group-wide">
+              <span className="filter-label">Collections</span>
+              {collections.map((collection) => (
+                <button
+                  key={collection.id}
+                  className={`filter-chip ${
+                    filters.collectionNames?.includes(collection.name) ? 'filter-chip-active' : ''
+                  }`}
+                  onClick={() =>
+                    applyFilters({
+                      ...filters,
+                      collectionNames: toggleStringFilter(
+                        filters.collectionNames ?? [],
+                        collection.name
+                      )
+                    })
+                  }
+                  disabled={busy}
+                >
+                  {collection.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      {selectedAssetIds.length > 0 ? (
+        <section className="batch-bar panel" ref={batchBarRef}>
+          <div className="batch-summary">
+            <strong>{selectedAssetIds.length} selected</strong>
+            <span>
+              {selectedAssetIds.length === 1
+                ? formatAssetLabel(assetMap.get(selectedAssetIds[0]) ?? null)
+                : 'Batch organization controls'}
+            </span>
+          </div>
+
+          <div className="batch-actions">
+            <button
+              onClick={() => {
+                if (selectedAssetIds.length === 1) {
+                  openAssetViewer(selectedAssetIds[0]);
+                }
+              }}
+              disabled={busy || selectedAssetIds.length !== 1}
+            >
+              View Selected
+            </button>
+            <button
+              onClick={() => void retryAssets(selectedAssetIds, 'Retry selected assets')}
+              disabled={busy || !hasApiKey}
+            >
+              Reindex Selection
+            </button>
+            <button
+              onClick={() => {
+                setSelectedAssetIds([]);
+                setBatchMode(null);
+              }}
+              disabled={busy}
+            >
+              Clear Selection
+            </button>
+          </div>
+
+          <div className={`batch-editor ${batchMode === 'tag' ? 'batch-editor-active' : ''}`}>
+            <label>Tag selection</label>
+            <div className="batch-editor-controls">
+              <select
+                value={batchTagId}
+                onChange={(event) => setBatchTagId(event.target.value)}
+                disabled={busy}
+              >
+                <option value="">Choose existing tag</option>
+                {tags.map((tag) => (
+                  <option key={tag.id} value={tag.id}>
+                    {tag.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={batchTagInput}
+                onChange={(event) => setBatchTagInput(event.target.value)}
+                placeholder="or create tag"
+                disabled={busy}
+              />
+              <button onClick={applyBatchTag} disabled={busy}>
+                Apply Tag
+              </button>
+            </div>
+          </div>
+
+          <div
+            className={`batch-editor ${batchMode === 'collection' ? 'batch-editor-active' : ''}`}
+          >
+            <label>Add to collection</label>
+            <div className="batch-editor-controls">
+              <select
+                value={batchCollectionId}
+                onChange={(event) => setBatchCollectionId(event.target.value)}
+                disabled={busy}
+              >
+                <option value="">Choose existing collection</option>
+                {collections.map((collection) => (
+                  <option key={collection.id} value={collection.id}>
+                    {collection.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={batchCollectionInput}
+                onChange={(event) => setBatchCollectionInput(event.target.value)}
+                placeholder="or create collection"
+                disabled={busy}
+              />
+              <button onClick={applyBatchCollection} disabled={busy}>
+                Apply Collection
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       <section className="content">
         <section className="grid" style={gridStyle}>
           {filteredAssets.length === 0 ? (
             <div className="grid-empty">
               <strong>No assets to show.</strong>
-              <p>Import files or loosen the current search and mime filters.</p>
+              <p>Import files or loosen the current search and metadata filters.</p>
             </div>
           ) : null}
 
           {filteredAssets.map((asset) => {
             const imageSrc = getAssetImageSrc(asset);
+            const result = searchResults[asset.id];
             return (
               <article
                 key={asset.id}
-                className={`card ${selectedAssetId === asset.id ? 'card-selected' : ''}`}
-                onClick={() => setSelectedAssetId(asset.id)}
+                className={`card ${selectedAssetIdSet.has(asset.id) ? 'card-selected' : ''}`}
+                onClick={(event) => {
+                  if (event.metaKey || event.ctrlKey) {
+                    toggleAssetSelection(asset.id);
+                    return;
+                  }
+
+                  selectExclusive(asset.id);
+                }}
                 onDoubleClick={() => openAssetViewer(asset.id)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
@@ -697,38 +1374,107 @@ export const App = () => {
 
                   if (event.key === ' ') {
                     event.preventDefault();
-                    setSelectedAssetId(asset.id);
+                    toggleAssetSelection(asset.id);
                   }
                 }}
                 tabIndex={0}
               >
+                <button
+                  className={`card-select-toggle ${selectedAssetIdSet.has(asset.id) ? 'card-select-toggle-active' : ''}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleAssetSelection(asset.id);
+                  }}
+                >
+                  {selectedAssetIdSet.has(asset.id) ? '✓' : '+'}
+                </button>
                 <div className="card-media">
-                  {imageSrc ? <img src={imageSrc} alt={asset.id} /> : <div className="placeholder" />}
+                  {imageSrc ? (
+                    <img src={imageSrc} alt={asset.id} />
+                  ) : (
+                    <div className="placeholder" />
+                  )}
                 </div>
                 <div className="card-meta">
                   <div className="card-meta-copy">
                     <strong className="asset-name">{formatAssetLabel(asset)}</strong>
+                    <p className="asset-title-line">{asset.title || 'Untitled asset'}</p>
                     <p className="asset-dimensions">
-                      <span className="asset-badge">{asset.mime.split('/')[0]}</span>
-                      <span>{asset.width}×{asset.height} ·</span>
+                      <span className="asset-badge">{asset.mime.split('/')[1] ?? asset.mime}</span>
+                      <span>
+                        {asset.width}×{asset.height}
+                      </span>
                       <span className={`status-pill status-${asset.status}`}>
                         {statusLabel[asset.status]}
                       </span>
                     </p>
-                    {searchResults[asset.id] ? (
-                      <p className="reason">Why: {searchResults[asset.id]?.reasons.join(', ')}</p>
+                    <div className="hover-chip-row">
+                      {asset.tags.slice(0, 2).map((tag) => (
+                        <span key={`${asset.id}-tag-${tag}`} className="hover-chip">
+                          #{tag}
+                        </span>
+                      ))}
+                      {asset.collections.slice(0, 2).map((collection) => (
+                        <span
+                          key={`${asset.id}-collection-${collection}`}
+                          className="hover-chip hover-chip-muted"
+                        >
+                          {collection}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="hover-chip-row">
+                      {asset.dominantColors.slice(0, 3).map((color) => (
+                        <span key={`${asset.id}-color-${color}`} className="hover-chip">
+                          {formatColorFamilyLabel(color)}
+                        </span>
+                      ))}
+                      {asset.hasText ? (
+                        <span className="hover-chip hover-chip-muted">Text</span>
+                      ) : null}
+                    </div>
+                    {result ? (
+                      <>
+                        <p className="reason">Why: {result.reasons.join(', ')}</p>
+                        <p className="reason reason-secondary">
+                          {formatExplanationSummary(result.explanation).join(' · ') ||
+                            result.explanation.snippet}
+                        </p>
+                      </>
                     ) : null}
                   </div>
-                  <button
-                    className="card-view-button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openAssetViewer(asset.id);
-                    }}
-                    disabled={busy}
-                  >
-                    View
-                  </button>
+                  <div className="card-actions">
+                    <button
+                      className="card-view-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openAssetViewer(asset.id);
+                      }}
+                      disabled={busy}
+                    >
+                      View
+                    </button>
+                    <button
+                      className="card-quick-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        queueBatchMode('tag', asset.id);
+                      }}
+                      disabled={busy}
+                    >
+                      Tag
+                    </button>
+                    <button
+                      className="card-quick-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        queueBatchMode('collection', asset.id);
+                      }}
+                      disabled={busy}
+                    >
+                      Collect
+                    </button>
+                  </div>
                 </div>
               </article>
             );
@@ -752,6 +1498,7 @@ export const App = () => {
                   <span>
                     {viewerIndex + 1} of {filteredAssets.length}
                   </span>
+                  <span>{viewerAsset.title || 'Untitled asset'}</span>
                 </p>
               </div>
               <div className="asset-viewer-head-actions">
@@ -777,21 +1524,28 @@ export const App = () => {
               <aside className="asset-viewer-side">
                 <div className="asset-viewer-section">
                   <h4>Overview</h4>
-                  <p className="asset-viewer-identity">{viewerAsset.id}</p>
-                  <p>{viewerAsset.mime}</p>
-                  <p>{viewerAsset.width}×{viewerAsset.height}</p>
-                  <p>Imported {formatCreatedAt(viewerAsset.createdAt)}</p>
-                  <p>
-                    Status:{' '}
-                    <span className={`status-pill status-${viewerAsset.status}`}>
-                      {statusLabel[viewerAsset.status]}
-                    </span>
-                  </p>
-                </div>
-
-                <div className="asset-viewer-section">
-                  <h4>Actions</h4>
+                  {detailLoading ? <p>Loading asset detail…</p> : null}
+                  <label className="field-label">
+                    Title
+                    <input
+                      value={titleDraft}
+                      onChange={(event) => setTitleDraft(event.target.value)}
+                      disabled={busy || detailLoading}
+                    />
+                  </label>
+                  <label className="field-label">
+                    Note
+                    <textarea
+                      value={noteDraft}
+                      onChange={(event) => setNoteDraft(event.target.value)}
+                      rows={4}
+                      disabled={busy || detailLoading}
+                    />
+                  </label>
                   <div className="detail-actions asset-viewer-actions">
+                    <button onClick={saveAssetMetadata} disabled={busy || detailLoading}>
+                      Save Metadata
+                    </button>
                     <button
                       onClick={() => void retryAssets([viewerAsset.id], 'Retry asset')}
                       disabled={busy || !hasApiKey}
@@ -799,72 +1553,66 @@ export const App = () => {
                       {viewerAsset.status === 'failed' ? 'Retry Indexing' : 'Reindex Asset'}
                     </button>
                   </div>
+                  <p>{viewerAsset.mime}</p>
+                  <p>
+                    {viewerAsset.width}×{viewerAsset.height}
+                  </p>
+                  <p>Imported {formatCreatedAt(viewerAsset.createdAt)}</p>
+                  <p>Source: {formatImportSourceLabel(viewerAsset.importSource)}</p>
+                  {viewerDetail ? (
+                    <>
+                      <p className="asset-viewer-identity">{viewerDetail.id}</p>
+                      <p className="asset-viewer-identity">{viewerDetail.checksum}</p>
+                    </>
+                  ) : null}
                 </div>
 
-                <div className="asset-viewer-section">
-                  <h4>Tags</h4>
-                  <p>{viewerAsset.tags.join(', ') || 'none'}</p>
-                  <div className="inline-form">
-                    <input
-                      value={tagInput}
-                      onChange={(event) => setTagInput(event.target.value)}
-                      placeholder="new tag"
-                      disabled={busy}
-                    />
-                    <button
-                      onClick={() =>
-                        void runAction('Add tag', async () => {
-                          if (!tagInput.trim()) {
-                            setMessage('Tag name cannot be empty');
-                            return;
-                          }
-
-                          const response = await api.createTag(tagInput.trim());
-                          await attachTag(response.id);
-                          setTagInput('');
-                          setMessage('Tag attached');
-                        })
-                      }
-                      disabled={busy}
-                    >
-                      Add Tag
-                    </button>
+                {searchResults[viewerAsset.id] ? (
+                  <div className="asset-viewer-section">
+                    <h4>Why this matched</h4>
+                    <div className="chip-list">
+                      {searchResults[viewerAsset.id].reasons.map((reason) => (
+                        <span key={`${viewerAsset.id}-${reason}`} className="inline-chip">
+                          {reason}
+                        </span>
+                      ))}
+                    </div>
+                    <p>
+                      {formatExplanationSummary(searchResults[viewerAsset.id].explanation).join(
+                        ' · '
+                      )}
+                    </p>
+                    <p>{searchResults[viewerAsset.id].explanation.snippet}</p>
                   </div>
-                  <div className="chip-list">
-                    {tags.map((tag) => (
-                      <button key={tag.id} onClick={() => void attachTag(tag.id)} disabled={busy}>
-                        {tag.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                ) : null}
 
                 <div className="asset-viewer-section">
                   <h4>Collections</h4>
-                  <p>{viewerAsset.collections.join(', ') || 'none'}</p>
+                  <div className="chip-list">
+                    {(viewerDetail?.collectionEntries ?? []).map((collection) => (
+                      <span key={collection.id} className="editable-chip">
+                        {collection.name}
+                        <button
+                          onClick={() =>
+                            void runAction('Remove collection', async () => {
+                              await detachCollection(viewerAsset.id, collection.id);
+                            })
+                          }
+                          disabled={busy}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
                   <div className="inline-form">
                     <input
-                      value={collectionInput}
-                      onChange={(event) => setCollectionInput(event.target.value)}
+                      value={viewerCollectionInput}
+                      onChange={(event) => setViewerCollectionInput(event.target.value)}
                       placeholder="new collection"
                       disabled={busy}
                     />
-                    <button
-                      onClick={() =>
-                        void runAction('Add collection', async () => {
-                          if (!collectionInput.trim()) {
-                            setMessage('Collection name cannot be empty');
-                            return;
-                          }
-
-                          const response = await api.createCollection(collectionInput.trim());
-                          await attachCollection(response.id);
-                          setCollectionInput('');
-                          setMessage('Collection attached');
-                        })
-                      }
-                      disabled={busy}
-                    >
+                    <button onClick={() => void createAndAttachViewerCollection()} disabled={busy}>
                       Add Collection
                     </button>
                   </div>
@@ -872,7 +1620,11 @@ export const App = () => {
                     {collections.map((collection) => (
                       <button
                         key={collection.id}
-                        onClick={() => void attachCollection(collection.id)}
+                        onClick={() =>
+                          void runAction('Attach collection', async () => {
+                            await attachCollection(viewerAsset.id, collection.id);
+                          })
+                        }
                         disabled={busy}
                       >
                         {collection.name}
@@ -880,6 +1632,107 @@ export const App = () => {
                     ))}
                   </div>
                 </div>
+
+                <div className="asset-viewer-section">
+                  <h4>Tags</h4>
+                  <div className="chip-list">
+                    {(viewerDetail?.tagEntries ?? []).map((tag) => (
+                      <span key={tag.id} className="editable-chip">
+                        {tag.name}
+                        <button
+                          onClick={() =>
+                            void runAction('Remove tag', async () => {
+                              await detachTag(viewerAsset.id, tag.id);
+                            })
+                          }
+                          disabled={busy}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="inline-form">
+                    <input
+                      value={viewerTagInput}
+                      onChange={(event) => setViewerTagInput(event.target.value)}
+                      placeholder="new tag"
+                      disabled={busy}
+                    />
+                    <button onClick={() => void createAndAttachViewerTag()} disabled={busy}>
+                      Add Tag
+                    </button>
+                  </div>
+                  <div className="chip-list">
+                    {tags.map((tag) => (
+                      <button
+                        key={tag.id}
+                        onClick={() =>
+                          void runAction('Attach tag', async () => {
+                            await attachTag(viewerAsset.id, tag.id);
+                          })
+                        }
+                        disabled={busy}
+                      >
+                        {tag.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {viewerDetail ? (
+                  <div className="asset-viewer-section">
+                    <h4>Extracted metadata</h4>
+                    <div className="chip-list">
+                      <span className="inline-chip">{viewerDetail.enrichment.orientation}</span>
+                      <span className="inline-chip">{viewerDetail.enrichment.aspectBucket}</span>
+                      <span className="inline-chip">
+                        {viewerDetail.enrichment.hasText ? 'has text' : 'no text'}
+                      </span>
+                      {viewerDetail.enrichment.dominantColors.map((color) => (
+                        <span key={`${viewerDetail.id}-${color}`} className="inline-chip">
+                          {formatColorFamilyLabel(color)}
+                        </span>
+                      ))}
+                    </div>
+                    {Object.keys(viewerDetail.enrichment.exif).length > 0 ? (
+                      <dl className="meta-pairs">
+                        {Object.entries(viewerDetail.enrichment.exif).map(([key, value]) => (
+                          <div key={key}>
+                            <dt>{key}</dt>
+                            <dd>{String(value)}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : (
+                      <p>No EXIF metadata detected.</p>
+                    )}
+                  </div>
+                ) : null}
+
+                {viewerDetail ? (
+                  <div className="asset-viewer-section">
+                    <h4>Retrieval caption</h4>
+                    <p>{viewerDetail.retrievalCaption}</p>
+                  </div>
+                ) : null}
+
+                {viewerDetail ? (
+                  <div className="asset-viewer-section">
+                    <h4>Search document</h4>
+                    <div className="search-document-list">
+                      {viewerDetail.searchDocumentSections.map((section) => (
+                        <article
+                          key={`${viewerDetail.id}-${section.section}`}
+                          className="search-document-section"
+                        >
+                          <strong>{section.section}</strong>
+                          <p>{section.content}</p>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </aside>
             </div>
           </section>
@@ -926,13 +1779,13 @@ export const App = () => {
               </button>
               <button
                 onClick={() =>
-                  selectedAsset
-                    ? void retryAssets([selectedAsset.id], 'Retry selected asset')
-                    : setMessage('Select an asset first')
+                  selectedAssetIds.length > 0
+                    ? void retryAssets(selectedAssetIds, 'Retry selected assets')
+                    : setMessage('Select assets first')
                 }
-                disabled={busy || !hasApiKey || !selectedAsset}
+                disabled={busy || !hasApiKey || selectedAssetIds.length === 0}
               >
-                Retry Selected
+                Retry Selection
               </button>
               <button
                 onClick={() =>
@@ -992,7 +1845,10 @@ export const App = () => {
                     {failedJobs.map((job) => {
                       const asset = assetMap.get(job.assetId) ?? null;
                       return (
-                        <article className="job-row job-row-failed" key={`${job.assetId}-${job.stage}`}>
+                        <article
+                          className="job-row job-row-failed"
+                          key={`${job.assetId}-${job.stage}`}
+                        >
                           <div className="job-row-main">
                             <div className="job-title-line">
                               <span className={`status-pill status-${job.status}`}>
@@ -1030,7 +1886,10 @@ export const App = () => {
                     {recentSuccessfulJobs.map((job) => {
                       const asset = assetMap.get(job.assetId) ?? null;
                       return (
-                        <article className="job-row job-row-success" key={`${job.assetId}-${job.stage}`}>
+                        <article
+                          className="job-row job-row-success"
+                          key={`${job.assetId}-${job.stage}`}
+                        >
                           <div className="job-row-main">
                             <div className="job-title-line">
                               <span className={`status-pill status-${job.status}`}>

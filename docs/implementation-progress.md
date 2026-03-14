@@ -49,3 +49,9 @@ This file records progress while implementing `IMPLEMENTATION_PLAN_V1.md` end-to
    - Switched grid thumbnail generation to preserve original aspect ratio instead of forcing square derivatives.
    - Persisted real thumbnail dimensions and revision timestamps in SQLite.
    - Added startup maintenance to auto-repair missing or previously stretched grid thumbnails for existing libraries.
+
+9. **Metadata and retrieval level-up**
+   - Extended the asset contract surfaced to the renderer with title, note, import source, enrichment summary, and saved-search state.
+   - Added editable asset detail flows, tag/collection removal, and batch organization controls in the grid-first UI.
+   - Added local enrichment storage for OCR text, dominant color families, orientation/aspect buckets, and EXIF-like source metadata.
+   - Rebuilt the search document from editable metadata plus enrichment output, and upgraded search explanations to return structured match reasons.

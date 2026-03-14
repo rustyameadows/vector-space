@@ -26,7 +26,7 @@ Vector Space uses Google Generative Language API `embedContent`:
 For each imported asset, indexing now writes:
 
 - `visual` embedding (`image` only)
-- `text` embedding (`title + tags + collection + note + pseudo OCR text`)
+- `text` embedding (`title + tags + collection + note + OCR + extracted metadata text`)
 - `joint` embedding (`image + focused text`)
 
 Document embeddings are created with `taskType: RETRIEVAL_DOCUMENT`.
@@ -45,7 +45,8 @@ Ranking blends:
 
 1. role-weighted vector similarity (`visual`, `text`, `joint`)
 2. lexical overlap across title/note/caption/tags/collections/chunks
-3. filter checks (`status`, mime prefix, tags, collections)
+3. metadata boosts for exact tag/collection/field matches
+4. filter checks (`status`, mime prefix, tags, collections, orientation, color, has-text`)
 
 Search supports two rank modes:
 
