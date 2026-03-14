@@ -40,7 +40,7 @@ This file records progress while implementing `IMPLEMENTATION_PLAN_V1.md` end-to
    - Added mac packaging script and generated fresh mac artifacts for handoff.
 
 7. **Gemini production wiring**
-   - Replaced simulated Gemini behavior with real `embedContent` API calls for `gemini-embedding-001`.
+   - Replaced simulated Gemini behavior with real `embedContent` API calls for `gemini-embedding-2-preview`.
    - Removed deterministic fallback embeddings to enforce Gemini as the only embedding source.
    - Added in-app API key management and persisted credentials in macOS Keychain.
    - Added integration notes documenting API contract and keychain-based runtime setup.

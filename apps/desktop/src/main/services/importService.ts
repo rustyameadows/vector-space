@@ -13,6 +13,7 @@ import {
   getImageMetadata,
   SUPPORTED_IMAGE_EXTENSIONS
 } from './imageProcessing';
+import { GEMINI_EMBEDDING_VERSION } from '../../shared/gemini';
 
 const SUPPORTED_EXTENSIONS = new Set<string>(SUPPORTED_IMAGE_EXTENSIONS);
 
@@ -112,7 +113,7 @@ export class ImportService {
           sourceType: 'image',
           aspectRatio: Number((size.width / Math.max(size.height, 1)).toFixed(3)),
           layoutType: deriveLayoutHint(size.width, size.height),
-          embeddingVersion: 'gemini-embedding-001/p3-e2-o2'
+          embeddingVersion: GEMINI_EMBEDDING_VERSION
         })
       });
       imported += 1;

@@ -4,6 +4,8 @@ export type EmbeddingRole = 'joint' | 'visual' | 'text' | 'chunk';
 
 export type SearchMode = 'similarity' | 'exploration';
 
+export type IndexJobStatus = 'queued' | 'running' | 'success' | 'failed';
+
 export interface AssetRecord {
   id: string;
   createdAt: string;
@@ -41,6 +43,14 @@ export interface AppAssetView {
   tags: string[];
   collections: string[];
   retrievalCaption: string;
+}
+
+export interface IndexJobView {
+  assetId: string;
+  stage: string;
+  status: IndexJobStatus;
+  error: string | null;
+  updatedAt: string;
 }
 
 export interface EmbeddingRecord {

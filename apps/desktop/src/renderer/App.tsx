@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { GEMINI_EMBEDDING_MODEL, getGeminiApiSettings } from '../shared/gemini';
 
 type Asset = {
   id: string;
@@ -18,7 +19,7 @@ type VectorSpaceApi = Window['vectorSpace'];
 type Job = {
   assetId: string;
   stage: string;
-  status: string;
+  status: 'queued' | 'running' | 'success' | 'failed';
   error: string | null;
   updatedAt: string;
 };
@@ -36,6 +37,43 @@ const parseErrorMessage = (error: unknown): string => {
   }
 
   return 'Unexpected error';
+};
+
+const formatAssetLabel = (asset: Asset | null) => {
+  if (!asset) {
+    return 'Unknown asset';
+  }
+
+  const parts = asset.originalPath.split(/[/\\]/);
+  return (parts.at(-1) ?? asset.id).toUpperCase();
+};
+
+const formatJobUpdatedAt = (isoTimestamp: string): string => {
+  const timestamp = new Date(isoTimestamp);
+  if (Number.isNaN(timestamp.getTime())) {
+    return 'Updated just now';
+  }
+
+  return `Updated ${timestamp.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit'
+  })}`;
+};
+
+const summarizeJobError = (error: string | null) => {
+  if (!error) {
+    return '';
+  }
+
+  if (error.includes('NOT_FOUND')) {
+    return 'The configured Gemini embedding model was not available for that run.';
+  }
+
+  if (error.includes('INVALID_ARGUMENT')) {
+    return 'Gemini rejected the request payload for that run.';
+  }
+
+  return error;
 };
 
 const previewPalettes = [
@@ -90,6 +128,20 @@ const createPreviewApi = (): VectorSpaceApi => {
         status: 'running',
         error: null,
         updatedAt: new Date().toISOString()
+      },
+      {
+        assetId: 'demo-0006',
+        stage: 'embedding',
+        status: 'queued',
+        error: null,
+        updatedAt: new Date(Date.now() - 30_000).toISOString()
+      },
+      {
+        assetId: 'demo-0009',
+        stage: 'embedding',
+        status: 'failed',
+        error: 'The configured Gemini embedding model was not available for that run.',
+        updatedAt: new Date(Date.now() - 300_000).toISOString()
       }
     ],
     listTags: async () => [
@@ -113,11 +165,12 @@ const createPreviewApi = (): VectorSpaceApi => {
     pauseIndexing: async () => ({ ok: true }),
     resumeIndexing: async () => ({ ok: true }),
     reindex: async () => ({ ok: true }),
+    retryAssets: async () => ({ ok: true }),
     searchText: async () => [],
     searchImage: async () => [],
     getNetworkState: async () => ({ online: true }),
     setNetworkState: async (nextOnline: boolean) => ({ online: nextOnline }),
-    getApiSettings: async () => ({ hasApiKey: true, model: 'gemini-embedding-001' }),
+    getApiSettings: async () => getGeminiApiSettings(true),
     setApiKey: async () => ({ hasApiKey: true }),
     clearApiKey: async () => ({ hasApiKey: false })
   };
@@ -160,6 +213,7 @@ export const App = () => {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showJobs, setShowJobs] = useState(false);
+  const [apiModel, setApiModel] = useState<string>(GEMINI_EMBEDDING_MODEL);
 
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedAssetId) ?? null,
@@ -194,6 +248,7 @@ export const App = () => {
     setCollections(collectionRows);
     setOnline(networkState.online);
     setHasApiKey(apiSettings.hasApiKey);
+    setApiModel(apiSettings.model);
   }, [api]);
 
   useEffect(() => {
@@ -336,21 +391,47 @@ export const App = () => {
     await refresh();
   };
 
-  const getAssetLabel = (asset: Asset) => {
-    const parts = asset.originalPath.split(/[/\\]/);
-    return (parts.at(-1) ?? asset.id).toUpperCase();
+  const retryAssets = async (assetIds: string[], label: string) => {
+    await runAction(label, async () => {
+      const uniqueAssetIds = Array.from(new Set(assetIds));
+      if (uniqueAssetIds.length === 0) {
+        setMessage('Nothing to retry');
+        return;
+      }
+
+      await api.retryAssets(uniqueAssetIds);
+      setMessage(
+        uniqueAssetIds.length === 1
+          ? 'Asset requeued for indexing'
+          : `Requeued ${uniqueAssetIds.length} assets for indexing`
+      );
+      await refresh();
+    });
   };
 
-  const runningJobs = jobs.filter(
-    (job) => job.status === 'running' || job.status === 'queued'
-  ).length;
-  const failedJobs = jobs.filter((job) => job.status === 'failed' || Boolean(job.error)).length;
+  const assetMap = useMemo(
+    () => new Map(assets.map((asset) => [asset.id, asset])),
+    [assets]
+  );
+
+  const activeJobs = useMemo(
+    () => jobs.filter((job) => job.status === 'running' || job.status === 'queued'),
+    [jobs]
+  );
+  const failedJobs = useMemo(() => jobs.filter((job) => job.status === 'failed'), [jobs]);
+  const recentSuccessfulJobs = useMemo(
+    () => jobs.filter((job) => job.status === 'success').slice(0, 6),
+    [jobs]
+  );
+
+  const runningJobs = activeJobs.length;
+  const failedJobCount = failedJobs.length;
   const jobPillLabel =
     runningJobs > 0
-      ? `Jobs ${runningJobs} running`
-      : failedJobs > 0
-        ? `Jobs ${failedJobs} failed`
-        : `Jobs ${jobs.length}`;
+      ? `Queue ${runningJobs} active${failedJobCount > 0 ? ` · ${failedJobCount} failed` : ''}`
+      : failedJobCount > 0
+        ? `Queue idle · ${failedJobCount} failed`
+        : 'Queue idle';
 
   const getAssetImageSrc = (asset: Asset) => {
     if (!asset.thumbnailPath) {
@@ -453,7 +534,7 @@ export const App = () => {
               >
                 {imageSrc ? <img src={imageSrc} alt={asset.id} /> : <div className="placeholder" />}
                 <div className="card-meta">
-                  <strong className="asset-name">{getAssetLabel(asset)}</strong>
+                  <strong className="asset-name">{formatAssetLabel(asset)}</strong>
                   <p className="asset-dimensions">
                     <span className="asset-badge">{asset.mime.split('/')[0]}</span>
                     {asset.width}×{asset.height} ·{' '}
@@ -476,8 +557,23 @@ export const App = () => {
             <>
               <p>{selectedAsset.id}</p>
               <p>{selectedAsset.mime}</p>
+              <p>
+                Status:{' '}
+                <span className={`status-pill status-${selectedAsset.status}`}>
+                  {statusLabel[selectedAsset.status]}
+                </span>
+              </p>
               <p>Tags: {selectedAsset.tags.join(', ') || 'none'}</p>
               <p>Collections: {selectedAsset.collections.join(', ') || 'none'}</p>
+
+              <div className="detail-actions">
+                <button
+                  onClick={() => void retryAssets([selectedAsset.id], 'Retry asset')}
+                  disabled={busy || !hasApiKey}
+                >
+                  {selectedAsset.status === 'failed' ? 'Retry Indexing' : 'Reindex Asset'}
+                </button>
+              </div>
 
               <div className="inline-form">
                 <input
@@ -569,19 +665,161 @@ export const App = () => {
               <h3>Index Jobs</h3>
               <button onClick={() => setShowJobs(false)}>Close</button>
             </div>
-            <ul>
-              {jobs.length === 0 ? (
-                <li>No indexing jobs yet.</li>
-              ) : (
-                jobs.slice(0, 20).map((job) => (
-                  <li key={`${job.assetId}-${job.updatedAt}`}>
-                    <b>{job.status}</b> · {job.stage} ·{' '}
-                    <span className="mono-text">{job.assetId.slice(0, 12)}</span>{' '}
-                    {job.error ? `(${job.error})` : ''}
-                  </li>
-                ))
-              )}
-            </ul>
+
+            <div className="jobs-summary-grid">
+              <article className="jobs-summary-card">
+                <strong>{runningJobs}</strong>
+                <span>Active now</span>
+              </article>
+              <article className="jobs-summary-card">
+                <strong>{failedJobCount}</strong>
+                <span>Needs retry</span>
+              </article>
+              <article className="jobs-summary-card">
+                <strong>{recentSuccessfulJobs.length}</strong>
+                <span>Recent success</span>
+              </article>
+            </div>
+
+            <div className="jobs-toolbar">
+              <button
+                onClick={() =>
+                  void retryAssets(
+                    failedJobs.map((job) => job.assetId),
+                    'Retry failed assets'
+                  )
+                }
+                disabled={busy || !hasApiKey || failedJobCount === 0}
+              >
+                Retry Failed
+              </button>
+              <button
+                onClick={() =>
+                  selectedAsset
+                    ? void retryAssets([selectedAsset.id], 'Retry selected asset')
+                    : setMessage('Select an asset first')
+                }
+                disabled={busy || !hasApiKey || !selectedAsset}
+              >
+                Retry Selected
+              </button>
+              <button
+                onClick={() =>
+                  void runAction('Refresh status', async () => {
+                    await refresh();
+                  })
+                }
+                disabled={busy}
+              >
+                Refresh Status
+              </button>
+            </div>
+
+            <div className="jobs-sections">
+              <section className="jobs-section">
+                <div className="jobs-section-head">
+                  <h4>Queue</h4>
+                  <span>{runningJobs === 0 ? 'Idle' : `${runningJobs} active`}</span>
+                </div>
+                {activeJobs.length === 0 ? (
+                  <p className="jobs-empty">Nothing is queued or running.</p>
+                ) : (
+                  <div className="jobs-list">
+                    {activeJobs.map((job) => {
+                      const asset = assetMap.get(job.assetId) ?? null;
+                      return (
+                        <article className="job-row" key={`${job.assetId}-${job.stage}`}>
+                          <div className="job-row-main">
+                            <div className="job-title-line">
+                              <span className={`status-pill status-${job.status}`}>
+                                {job.status}
+                              </span>
+                              <strong>{formatAssetLabel(asset)}</strong>
+                            </div>
+                            <p className="job-meta">
+                              <span className="mono-text">{job.assetId.slice(0, 12)}</span>
+                              <span>{job.stage}</span>
+                              <span>{formatJobUpdatedAt(job.updatedAt)}</span>
+                            </p>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+
+              <section className="jobs-section">
+                <div className="jobs-section-head">
+                  <h4>Needs attention</h4>
+                  <span>{failedJobCount === 0 ? 'Clear' : `${failedJobCount} failed`}</span>
+                </div>
+                {failedJobs.length === 0 ? (
+                  <p className="jobs-empty">No failed assets right now.</p>
+                ) : (
+                  <div className="jobs-list">
+                    {failedJobs.map((job) => {
+                      const asset = assetMap.get(job.assetId) ?? null;
+                      return (
+                        <article className="job-row job-row-failed" key={`${job.assetId}-${job.stage}`}>
+                          <div className="job-row-main">
+                            <div className="job-title-line">
+                              <span className={`status-pill status-${job.status}`}>
+                                {job.status}
+                              </span>
+                              <strong>{formatAssetLabel(asset)}</strong>
+                            </div>
+                            <p className="job-meta">
+                              <span className="mono-text">{job.assetId.slice(0, 12)}</span>
+                              <span>{job.stage}</span>
+                              <span>{formatJobUpdatedAt(job.updatedAt)}</span>
+                            </p>
+                            <p className="job-error">{summarizeJobError(job.error)}</p>
+                          </div>
+                          <button
+                            onClick={() => void retryAssets([job.assetId], 'Retry failed asset')}
+                            disabled={busy || !hasApiKey}
+                          >
+                            Retry
+                          </button>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+
+              {recentSuccessfulJobs.length > 0 ? (
+                <section className="jobs-section">
+                  <div className="jobs-section-head">
+                    <h4>Recent success</h4>
+                    <span>{recentSuccessfulJobs.length} shown</span>
+                  </div>
+                  <div className="jobs-list">
+                    {recentSuccessfulJobs.map((job) => {
+                      const asset = assetMap.get(job.assetId) ?? null;
+                      return (
+                        <article className="job-row job-row-success" key={`${job.assetId}-${job.stage}`}>
+                          <div className="job-row-main">
+                            <div className="job-title-line">
+                              <span className={`status-pill status-${job.status}`}>
+                                {job.status}
+                              </span>
+                              <strong>{formatAssetLabel(asset)}</strong>
+                            </div>
+                            <p className="job-meta">
+                              <span className="mono-text">{job.assetId.slice(0, 12)}</span>
+                              <span>{job.stage}</span>
+                              <span>{formatJobUpdatedAt(job.updatedAt)}</span>
+                            </p>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
+            </div>
           </section>
         </div>
       ) : null}
@@ -597,6 +835,9 @@ export const App = () => {
             <div className="api-panel">
               <strong>Gemini API Key</strong>
               <span>{hasApiKey ? 'Saved in macOS Keychain' : 'Not configured'}</span>
+              <span>
+                Embedding model: <span className="mono-text">{apiModel}</span>
+              </span>
               <input
                 type="password"
                 value={apiKeyInput}

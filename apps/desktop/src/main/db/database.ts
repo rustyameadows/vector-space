@@ -1,11 +1,13 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { collapseIndexJobHistory, collectInterruptedJobRowIds } from '../jobs/jobState';
 import type {
   AppAssetView,
   AssetRecord,
   EmbeddingRecord,
-  EmbeddingRole
+  EmbeddingRole,
+  IndexJobView
 } from '../types/domain';
 
 const MIGRATIONS = [
@@ -272,6 +274,55 @@ export class VectorSpaceDb {
       .run(randomUUID(), assetId, stage, status, 0, error ?? null, now, now);
   }
 
+  public recoverInterruptedIndexJobs(
+    message = 'Indexing stopped before completion. Re-run the asset to try again.'
+  ): number {
+    const rows = this.db
+      .prepare(
+        'SELECT rowid, asset_id, stage, status, error, updated_at FROM index_jobs ORDER BY updated_at DESC, rowid DESC'
+      )
+      .all() as Array<{
+      rowid: number;
+      asset_id: string;
+      stage: string;
+      status: IndexJobView['status'];
+      error: string | null;
+      updated_at: string;
+    }>;
+
+    const rowIds = collectInterruptedJobRowIds(
+      rows.map((row) => ({
+        rowId: row.rowid,
+        assetId: row.asset_id,
+        stage: row.stage,
+        status: row.status,
+        error: row.error,
+        updatedAt: row.updated_at
+      }))
+    );
+
+    if (rowIds.length === 0) {
+      return 0;
+    }
+
+    const now = new Date().toISOString();
+    const updateJob = this.db.prepare(
+      'UPDATE index_jobs SET status = ?, error = ?, updated_at = ? WHERE rowid = ?'
+    );
+    const updateAsset = this.db.prepare(
+      "UPDATE assets SET status = 'failed' WHERE id IN (SELECT asset_id FROM index_jobs WHERE rowid = ?)"
+    );
+    const tx = this.db.transaction(() => {
+      rowIds.forEach((rowId) => {
+        updateJob.run('failed', message, now, rowId);
+        updateAsset.run(rowId);
+      });
+    });
+
+    tx();
+    return rowIds.length;
+  }
+
   public listAssets(): AppAssetView[] {
     const rows = this.db
       .prepare(
@@ -522,31 +573,31 @@ export class VectorSpaceDb {
     ).map((entry) => entry.name);
   }
 
-  public listIndexJobs(): Array<{
-    assetId: string;
-    stage: string;
-    status: string;
-    error: string | null;
-    updatedAt: string;
-  }> {
+  public listIndexJobs(): IndexJobView[] {
     const rows = this.db
       .prepare(
-        'SELECT asset_id, stage, status, error, updated_at FROM index_jobs ORDER BY updated_at DESC LIMIT 100'
+        'SELECT rowid, asset_id, stage, status, error, updated_at FROM index_jobs ORDER BY updated_at DESC, rowid DESC'
       )
       .all() as Array<{
+      rowid: number;
       asset_id: string;
       stage: string;
-      status: string;
+      status: IndexJobView['status'];
       error: string | null;
       updated_at: string;
     }>;
 
-    return rows.map((row) => ({
-      assetId: row.asset_id,
-      stage: row.stage,
-      status: row.status,
-      error: row.error,
-      updatedAt: row.updated_at
-    }));
+    return collapseIndexJobHistory(
+      rows.map((row) => ({
+        rowId: row.rowid,
+        assetId: row.asset_id,
+        stage: row.stage,
+        status: row.status,
+        error: row.error,
+        updatedAt: row.updated_at
+      }))
+    )
+      .slice(0, 100)
+      .map(({ rowId: _rowId, ...job }) => job);
   }
 }

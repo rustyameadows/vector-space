@@ -19,6 +19,7 @@ interface VectorSpaceApi {
   pauseIndexing: () => Promise<{ ok: boolean }>;
   resumeIndexing: () => Promise<{ ok: boolean }>;
   reindex: () => Promise<{ ok: boolean }>;
+  retryAssets: (assetIds: string[]) => Promise<{ ok: boolean }>;
   searchText: (
     query: string
   ) => Promise<Array<{ assetId: string; score: number; reasons: string[] }>>;

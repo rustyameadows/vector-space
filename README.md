@@ -7,7 +7,7 @@ Local-first macOS Electron app for a personal visual archive.
 - Node.js 20 LTS (`20.20.1` verified in this repo)
 - npm 10+
 - Xcode Command Line Tools (`xcode-select --install`)
-- Gemini API key from Google AI Studio
+- Gemini API key from Google AI Studio for `gemini-embedding-2-preview`
 
 ## Getting started
 
@@ -23,6 +23,8 @@ If you use `nvm`, run `nvm use` first. Otherwise install Node 20 LTS and confirm
 ## Gemini API key setup (macOS keychain)
 
 This app does **not** use environment variables for API credentials.
+
+The app uses exactly `gemini-embedding-2-preview` for embeddings. There is no alternate embedding model switch or fallback in the app.
 
 Use the in-app **Gemini API Key** panel to:
 
@@ -81,7 +83,7 @@ npm run package:mac --workspace @vector-space/desktop -- --arch=x64
 - SHA-256 duplicate detection and metadata persistence in SQLite.
 - Thumbnail generation and fast renderer grid browsing.
 - Background indexing queue with pause/resume/reindex controls.
-- Gemini multimodal embedding pipeline with role-specific vectors (`visual`, `text`, `joint`).
+- Gemini embedding pipeline pinned to `gemini-embedding-2-preview` with role-specific vectors (`visual`, `text`, `joint`).
 - Query/document task-type split for higher quality retrieval (`RETRIEVAL_DOCUMENT` vs `RETRIEVAL_QUERY`).
 - Hybrid retrieval blending vector similarity with lexical matching and metadata filters.
 - Chunked text sidecar storage for better long-text and OCR-oriented recall.
@@ -95,6 +97,7 @@ npm run lint
 npm run typecheck
 npm test
 npm run proof:imports --workspace @vector-space/desktop
+npm run proof:model-lock --workspace @vector-space/desktop
 npm run build
 ```
 
@@ -105,5 +108,6 @@ nvm use
 npm install
 npm test
 npm run proof:imports --workspace @vector-space/desktop
+npm run proof:model-lock --workspace @vector-space/desktop
 npm run package:mac
 ```

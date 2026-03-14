@@ -7,21 +7,23 @@ import {
   materializeImportFixture,
   materializeImportFixtures
 } from '../test-support/importFixtures';
+import type { AssetRecord } from '../types/domain';
+import { GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_VERSION } from '../../shared/gemini';
 import { getImageMetadata } from './imageProcessing';
 import { ImportService } from './importService';
 
 type AssetInsert = {
-  asset: {
-    id: string;
-    mime: string;
-    width: number;
-    height: number;
-    checksum: string;
-    sourcePath: string;
-  };
+  asset: AssetRecord;
   originalPath: string;
   originalSize: number;
   thumbPath: string;
+  metadata: {
+    title: string;
+    userNote: string;
+    sourceUrl?: string;
+    retrievalCaption: string;
+    metadataJson: string;
+  };
 };
 
 class FakeDb {
@@ -32,12 +34,13 @@ class FakeDb {
   }
 
   public insertAsset(
-    asset: AssetInsert['asset'],
+    asset: AssetRecord,
     originalPath: string,
     originalSize: number,
-    thumbPath: string
+    thumbPath: string,
+    metadata: AssetInsert['metadata']
   ): void {
-    this.inserts.push({ asset, originalPath, originalSize, thumbPath });
+    this.inserts.push({ asset, originalPath, originalSize, thumbPath, metadata });
   }
 }
 
@@ -73,6 +76,9 @@ describe('ImportService', () => {
       expect(entry?.asset.width).toBe(16);
       expect(entry?.asset.height).toBe(16);
       expect(entry?.thumbPath.endsWith('.png')).toBe(true);
+      expect(JSON.parse(entry!.metadata.metadataJson).embeddingVersion).toBe(
+        GEMINI_EMBEDDING_VERSION
+      );
       await stat(entry!.originalPath);
       await stat(entry!.thumbPath);
       const thumbMetadata = await getImageMetadata(entry!.thumbPath);
@@ -117,5 +123,8 @@ describe('ImportService', () => {
 
     expect(result).toEqual({ imported: 1, skipped: 1 });
     expect(db.inserts).toHaveLength(1);
+    expect(JSON.parse(db.inserts[0]!.metadata.metadataJson).embeddingVersion).toContain(
+      GEMINI_EMBEDDING_MODEL
+    );
   });
 });

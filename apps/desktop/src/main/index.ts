@@ -16,9 +16,17 @@ import {
   getGeminiApiKeyFromKeychain,
   setGeminiApiKeyInKeychain
 } from './embedding/keychain';
+import {
+  GEMINI_EMBEDDING_MODEL,
+  GEMINI_EXTRACTION_VERSION,
+  GEMINI_OCR_VERSION,
+  GEMINI_OUTPUT_DIMENSIONALITY,
+  GEMINI_PREPROCESSING_VERSION,
+  getGeminiApiSettings
+} from '../shared/gemini';
 import { IndexingService } from './services/indexingService';
 import { HybridSearchService } from './search/hybridSearch';
-import type { SearchMode } from './types/domain';
+import type { IndexJobView, SearchMode } from './types/domain';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const rendererDistPath = path.join(__dirname, '../renderer');
@@ -124,7 +132,7 @@ const createProviderFromKeychain = async (): Promise<EmbeddingProvider | null> =
     return null;
   }
 
-  return new GeminiEmbeddingProvider({ apiKey, model: 'gemini-embedding-001' });
+  return new GeminiEmbeddingProvider({ apiKey });
 };
 
 const requireEmbeddingProvider = (): EmbeddingProvider => {
@@ -299,17 +307,30 @@ const runSearch = async (params: {
   });
 };
 
+const listJobs = (): IndexJobView[] => {
+  const mergedJobs = new Map<string, IndexJobView>();
+
+  db.listIndexJobs().forEach((job) => {
+    mergedJobs.set(`${job.assetId}:${job.stage}`, job);
+  });
+
+  indexingService.getLiveJobs().forEach((job) => {
+    mergedJobs.set(`${job.assetId}:${job.stage}`, job);
+  });
+
+  return Array.from(mergedJobs.values()).sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt)
+  );
+};
+
 const registerIpc = (): void => {
   ipcMain.handle('library:list-assets', () => db.listAssets());
-  ipcMain.handle('library:list-jobs', () => db.listIndexJobs());
+  ipcMain.handle('library:list-jobs', () => listJobs());
   ipcMain.handle('library:list-tags', () => db.listTags());
   ipcMain.handle('library:list-collections', () => db.listCollections());
   ipcMain.handle('library:network-state', () => ({ online }));
 
-  ipcMain.handle('library:get-api-settings', () => ({
-    hasApiKey: Boolean(embeddingProvider),
-    model: 'gemini-embedding-001'
-  }));
+  ipcMain.handle('library:get-api-settings', () => getGeminiApiSettings(Boolean(embeddingProvider)));
 
   ipcMain.handle('library:set-api-key', async (_event, apiKey: string) => {
     if (isKeychainDisabled) {
@@ -425,6 +446,11 @@ const registerIpc = (): void => {
     return { ok: true };
   });
 
+  ipcMain.handle('library:retry-assets', async (_event, assetIds: string[]) => {
+    indexingService.retryAssets(assetIds);
+    return { ok: true };
+  });
+
   ipcMain.handle('library:search-text', async (_event, query: string) => {
     return runSearch({ text: query, mode: 'exploration' });
   });
@@ -439,16 +465,17 @@ app.whenReady().then(async () => {
     registerAppProtocol();
     const libraryPaths = await initializeLibraryPathing();
     db = new VectorSpaceDb(libraryPaths.db);
+    db.recoverInterruptedIndexJobs();
     importService = new ImportService(db);
     embeddingProvider = await createProviderFromKeychain();
 
     indexingService = new IndexingService(db, {
       name: 'gemini',
-      model: 'gemini-embedding-001',
-      preprocessingVersion: 3,
-      extractionVersion: 2,
-      ocrVersion: 2,
-      outputDimensionality: 3072,
+      model: GEMINI_EMBEDDING_MODEL,
+      preprocessingVersion: GEMINI_PREPROCESSING_VERSION,
+      extractionVersion: GEMINI_EXTRACTION_VERSION,
+      ocrVersion: GEMINI_OCR_VERSION,
+      outputDimensionality: GEMINI_OUTPUT_DIMENSIONALITY,
       embed: async (request) => requireEmbeddingProvider().embed(request)
     });
     searchService = new HybridSearchService(db);

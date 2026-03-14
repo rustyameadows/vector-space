@@ -10,7 +10,8 @@
 Vector Space uses Google Generative Language API `embedContent`:
 
 - Endpoint: `POST /v1beta/models/{model}:embedContent`
-- Model used: `gemini-embedding-001`
+- Model used: `gemini-embedding-2-preview`
+- Model policy: the app is pinned to this single embedding model with no runtime fallback or alternate selector.
 - Payload format:
   - `model: "models/{model}"`
   - `taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY"`
@@ -65,9 +66,9 @@ Endpoint and request shape validated from this environment using `curl`:
 
 ```bash
 curl -sS -o /tmp/gemini_probe.json -w "%{http_code}" \
-  -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=INVALID" \
+  -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2-preview:embedContent?key=INVALID" \
   -H "Content-Type: application/json" \
-  -d '{"model":"models/gemini-embedding-001","taskType":"RETRIEVAL_QUERY","content":{"parts":[{"text":"probe"}]}}'
+  -d '{"model":"models/gemini-embedding-2-preview","taskType":"RETRIEVAL_QUERY","content":{"parts":[{"text":"probe"}]}}'
 ```
 
 This returns expected auth error for invalid key, confirming endpoint path, method, and payload envelope alignment.

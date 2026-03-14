@@ -21,6 +21,7 @@ const api = {
   pauseIndexing: () => ipcRenderer.invoke('library:pause-indexing'),
   resumeIndexing: () => ipcRenderer.invoke('library:resume-indexing'),
   reindex: () => ipcRenderer.invoke('library:reindex'),
+  retryAssets: (assetIds: string[]) => ipcRenderer.invoke('library:retry-assets', assetIds),
   searchText: (query: string) => ipcRenderer.invoke('library:search-text', query),
   searchImage: (imagePath: string) => ipcRenderer.invoke('library:search-image', imagePath),
   getNetworkState: () => ipcRenderer.invoke('library:network-state'),

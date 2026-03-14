@@ -2,6 +2,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { VectorSpaceDb } from '../db/database';
 import type { EmbeddingProvider } from '../embedding/provider';
+import { buildGeminiEmbeddingVersion } from '../../shared/gemini';
+import type { IndexJobView } from '../types/domain';
 
 const tokenize = (value: string): string[] =>
   value
@@ -45,9 +47,15 @@ export class IndexingService {
 
   private queuedIds = new Set<string>();
 
+  private enqueuedAt = new Map<string, string>();
+
   private processing = false;
 
   private paused = false;
+
+  private activeAssetId: string | null = null;
+
+  private activeUpdatedAt: string | null = null;
 
   public constructor(
     private readonly db: VectorSpaceDb,
@@ -56,12 +64,13 @@ export class IndexingService {
 
   public enqueue(assetIds: string[]): void {
     assetIds.forEach((id) => {
-      if (this.queuedIds.has(id)) {
+      if (this.queuedIds.has(id) || this.activeAssetId === id) {
         return;
       }
 
       this.queue.push(id);
       this.queuedIds.add(id);
+      this.enqueuedAt.set(id, new Date().toISOString());
     });
 
     void this.process();
@@ -77,8 +86,49 @@ export class IndexingService {
   }
 
   public async reindexAll(): Promise<void> {
-    const ids = this.db.listAssets().map((asset) => asset.id);
-    this.enqueue(ids);
+    this.retryAssets(this.db.listAssets().map((asset) => asset.id));
+  }
+
+  public retryAssets(assetIds: string[]): void {
+    const uniqueIds = Array.from(new Set(assetIds));
+
+    uniqueIds.forEach((assetId) => {
+      if (!this.db.getAssetById(assetId)) {
+        return;
+      }
+
+      if (!this.queuedIds.has(assetId) && this.activeAssetId !== assetId) {
+        this.db.setAssetStatus(assetId, 'imported');
+      }
+    });
+
+    this.enqueue(uniqueIds);
+  }
+
+  public getLiveJobs(): IndexJobView[] {
+    const jobs: IndexJobView[] = [];
+
+    if (this.activeAssetId) {
+      jobs.push({
+        assetId: this.activeAssetId,
+        stage: 'embedding',
+        status: 'running',
+        error: null,
+        updatedAt: this.activeUpdatedAt ?? new Date().toISOString()
+      });
+    }
+
+    this.queue.forEach((assetId) => {
+      jobs.push({
+        assetId,
+        stage: 'embedding',
+        status: 'queued',
+        error: null,
+        updatedAt: this.enqueuedAt.get(assetId) ?? new Date().toISOString()
+      });
+    });
+
+    return jobs;
   }
 
   private async process(): Promise<void> {
@@ -92,9 +142,17 @@ export class IndexingService {
       const assetId = this.queue.shift();
       if (!assetId) continue;
       this.queuedIds.delete(assetId);
+      const startedAt = this.enqueuedAt.get(assetId) ?? new Date().toISOString();
+      this.enqueuedAt.delete(assetId);
+      this.activeAssetId = assetId;
+      this.activeUpdatedAt = startedAt;
 
       const asset = this.db.getAssetById(assetId);
-      if (!asset) continue;
+      if (!asset) {
+        this.activeAssetId = null;
+        this.activeUpdatedAt = null;
+        continue;
+      }
 
       try {
         this.db.setAssetStatus(assetId, 'indexing');
@@ -132,7 +190,12 @@ export class IndexingService {
           })
         ]);
 
-        const embeddingVersion = `${this.provider.model}/p${this.provider.preprocessingVersion}-e${this.provider.extractionVersion}-o${this.provider.ocrVersion}`;
+        const embeddingVersion = buildGeminiEmbeddingVersion({
+          model: this.provider.model,
+          preprocessingVersion: this.provider.preprocessingVersion,
+          extractionVersion: this.provider.extractionVersion,
+          ocrVersion: this.provider.ocrVersion
+        });
 
         this.db.upsertEmbedding({
           assetId,
@@ -181,6 +244,9 @@ export class IndexingService {
           'failed',
           error instanceof Error ? error.message : 'unknown error'
         );
+      } finally {
+        this.activeAssetId = null;
+        this.activeUpdatedAt = null;
       }
     }
 

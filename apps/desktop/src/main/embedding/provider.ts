@@ -1,3 +1,11 @@
+import {
+  GEMINI_EMBEDDING_MODEL,
+  GEMINI_EXTRACTION_VERSION,
+  GEMINI_OCR_VERSION,
+  GEMINI_OUTPUT_DIMENSIONALITY,
+  GEMINI_PREPROCESSING_VERSION
+} from '../../shared/gemini';
+
 export type GeminiTaskType = 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY';
 
 export interface EmbedRequest {
@@ -50,7 +58,6 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
   public constructor(
     config: {
       apiKey: string;
-      model?: string;
       preprocessingVersion?: number;
       extractionVersion?: number;
       ocrVersion?: number;
@@ -58,11 +65,11 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
     }
   ) {
     this.apiKey = config.apiKey.trim();
-    this.model = config.model ?? 'gemini-embedding-001';
-    this.preprocessingVersion = config.preprocessingVersion ?? 3;
-    this.extractionVersion = config.extractionVersion ?? 2;
-    this.ocrVersion = config.ocrVersion ?? 2;
-    this.outputDimensionality = config.outputDimensionality ?? 3072;
+    this.model = GEMINI_EMBEDDING_MODEL;
+    this.preprocessingVersion = config.preprocessingVersion ?? GEMINI_PREPROCESSING_VERSION;
+    this.extractionVersion = config.extractionVersion ?? GEMINI_EXTRACTION_VERSION;
+    this.ocrVersion = config.ocrVersion ?? GEMINI_OCR_VERSION;
+    this.outputDimensionality = config.outputDimensionality ?? GEMINI_OUTPUT_DIMENSIONALITY;
   }
 
   public async embed(request: EmbedRequest): Promise<number[]> {
