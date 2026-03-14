@@ -45,6 +45,8 @@ You can remove it anytime with **Clear Key**.
 - `tiff`
 - `tif`
 
+Imported assets now generate aspect-ratio-preserving grid thumbnails. Existing stretched grid thumbnails are repaired automatically on app launch.
+
 ## Build
 
 ```bash
@@ -55,6 +57,7 @@ Import-format proof:
 
 ```bash
 npm run proof:imports --workspace @vector-space/desktop
+npm run smoke:electron --workspace @vector-space/desktop
 ```
 
 ## Package mac artifact
@@ -82,6 +85,7 @@ npm run package:mac --workspace @vector-space/desktop -- --arch=x64
 - Import from file picker, folder ingest, drag/drop, and clipboard paste.
 - SHA-256 duplicate detection and metadata persistence in SQLite.
 - Thumbnail generation and fast renderer grid browsing.
+- Startup thumbnail maintenance that repairs legacy stretched grid previews in the background.
 - Single-asset viewer overlay with double-click entry, detail-panel CTA, and keyboard navigation.
 - Background indexing queue with pause/resume/reindex controls.
 - Gemini embedding pipeline pinned to `gemini-embedding-2-preview` with role-specific vectors (`visual`, `text`, `joint`).
@@ -98,6 +102,7 @@ npm run lint
 npm run typecheck
 npm test
 npm run proof:imports --workspace @vector-space/desktop
+npm run smoke:electron --workspace @vector-space/desktop
 npm run proof:model-lock --workspace @vector-space/desktop
 npm run build
 ```
@@ -109,6 +114,7 @@ nvm use
 npm install
 npm test
 npm run proof:imports --workspace @vector-space/desktop
+npm run smoke:electron --workspace @vector-space/desktop
 npm run proof:model-lock --workspace @vector-space/desktop
 npm run package:mac
 ```

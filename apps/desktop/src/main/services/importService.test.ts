@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   supportedImportEntries,
   materializeImportFixture,
-  materializeImportFixtures
+  materializeImportFixtures,
+  resizeFixtureImage
 } from '../test-support/importFixtures';
 import type { AssetRecord } from '../types/domain';
 import { GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_VERSION } from '../../shared/gemini';
@@ -16,7 +17,12 @@ type AssetInsert = {
   asset: AssetRecord;
   originalPath: string;
   originalSize: number;
-  thumbPath: string;
+  thumbnail: {
+    path: string;
+    width: number;
+    height: number;
+    updatedAt?: string;
+  };
   metadata: {
     title: string;
     userNote: string;
@@ -37,10 +43,10 @@ class FakeDb {
     asset: AssetRecord,
     originalPath: string,
     originalSize: number,
-    thumbPath: string,
+    thumbnail: AssetInsert['thumbnail'],
     metadata: AssetInsert['metadata']
   ): void {
-    this.inserts.push({ asset, originalPath, originalSize, thumbPath, metadata });
+    this.inserts.push({ asset, originalPath, originalSize, thumbnail, metadata });
   }
 }
 
@@ -75,16 +81,47 @@ describe('ImportService', () => {
       expect(entry?.asset.mime).toBe(fixture.mime);
       expect(entry?.asset.width).toBe(16);
       expect(entry?.asset.height).toBe(16);
-      expect(entry?.thumbPath.endsWith('.png')).toBe(true);
+      expect(entry?.thumbnail.path.endsWith('.png')).toBe(true);
       expect(JSON.parse(entry!.metadata.metadataJson).embeddingVersion).toBe(
         GEMINI_EMBEDDING_VERSION
       );
       await stat(entry!.originalPath);
-      await stat(entry!.thumbPath);
-      const thumbMetadata = await getImageMetadata(entry!.thumbPath);
+      await stat(entry!.thumbnail.path);
+      const thumbMetadata = await getImageMetadata(entry!.thumbnail.path);
       expect(thumbMetadata.width).toBe(320);
       expect(thumbMetadata.height).toBe(320);
+      expect(entry!.thumbnail.width).toBe(thumbMetadata.width);
+      expect(entry!.thumbnail.height).toBe(thumbMetadata.height);
     }
+  });
+
+  it('stores real non-square thumbnail dimensions for portrait imports', async () => {
+    tempRoot = await mkdtemp(path.join(os.tmpdir(), 'vector-space-import-ratio-test-'));
+    process.env.HOME = tempRoot;
+
+    const fixtureDir = path.join(tempRoot, 'fixtures');
+    const portraitPath = await materializeImportFixture(fixtureDir, '.png', 'portrait');
+    await resizeFixtureImage(portraitPath, 928, 1232);
+
+    const db = new FakeDb();
+    const service = new ImportService(db as never);
+
+    const result = await service.importPaths([portraitPath], 'file-picker');
+
+    expect(result).toEqual({ imported: 1, skipped: 0 });
+
+    const entry = db.inserts[0];
+    const thumbMetadata = await getImageMetadata(entry!.thumbnail.path);
+    const originalRatio = entry!.asset.width / entry!.asset.height;
+    const thumbnailRatio = thumbMetadata.width / thumbMetadata.height;
+
+    expect(entry!.asset.width).toBe(928);
+    expect(entry!.asset.height).toBe(1232);
+    expect(thumbMetadata.width).toBeLessThan(thumbMetadata.height);
+    expect(Math.max(thumbMetadata.width, thumbMetadata.height)).toBe(320);
+    expect(Math.abs(originalRatio - thumbnailRatio)).toBeLessThan(0.02);
+    expect(entry!.thumbnail.width).toBe(thumbMetadata.width);
+    expect(entry!.thumbnail.height).toBe(thumbMetadata.height);
   });
 
   it('collects nested supported formats including tif/tiff aliases', async () => {

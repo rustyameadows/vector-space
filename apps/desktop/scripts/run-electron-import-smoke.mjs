@@ -15,14 +15,38 @@ const screenshotPath = path.join(outputDir, 'electron-import-grid.png');
 const { _electron: electron } = await import('playwright');
 const {
   supportedImportEntries,
-  materializeImportFixtures
+  materializeImportFixtures,
+  resizeFixtureImage
 } = await import(path.join(appDir, 'dist/main/test-support/importFixtures.js'));
+const { getImageMetadata } = await import(path.join(appDir, 'dist/main/services/imageProcessing.js'));
+
+const fixtureSizes = [
+  { width: 1150, height: 1498 },
+  { width: 939, height: 194 },
+  { width: 1630, height: 337 },
+  { width: 1668, height: 2224 },
+  { width: 2224, height: 1668 },
+  { width: 1320, height: 2868 },
+  { width: 2360, height: 867 },
+  { width: 1284, height: 2778 }
+];
+const resizableExtensions = new Set(['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif']);
 
 await rm(outputDir, { recursive: true, force: true });
 await mkdir(fixtureOutputDir, { recursive: true });
 await mkdir(libraryRoot, { recursive: true });
 
 const inputPaths = await materializeImportFixtures(fixtureOutputDir);
+await Promise.all(
+  inputPaths.map((inputPath, index) => {
+    if (!resizableExtensions.has(path.extname(inputPath).toLowerCase())) {
+      return Promise.resolve();
+    }
+
+    const size = fixtureSizes[index % fixtureSizes.length];
+    return resizeFixtureImage(inputPath, size.width, size.height);
+  })
+);
 
 process.env.VECTOR_SPACE_LIBRARY_ROOT = libraryRoot;
 process.env.VECTOR_SPACE_DISABLE_KEYCHAIN = '1';
@@ -89,6 +113,7 @@ try {
   const rows = await Promise.all(
     uiState.assets.map(async (asset) => {
       const thumbBytes = await readFile(asset.thumbnailPath);
+      const thumbMetadata = await getImageMetadata(asset.thumbnailPath);
       const cardName = path.basename(asset.originalPath).toUpperCase();
       const card = cardMap.get(cardName) ?? null;
 
@@ -98,6 +123,10 @@ try {
         mime: asset.mime,
         originalPath: asset.originalPath,
         thumbnailPath: asset.thumbnailPath,
+        originalWidth: asset.width,
+        originalHeight: asset.height,
+        thumbnailWidth: thumbMetadata.width,
+        thumbnailHeight: thumbMetadata.height,
         uiImageSrc: card?.src ?? null,
         uiImageComplete: card?.complete ?? false,
         uiNaturalWidth: card?.naturalWidth ?? 0,
@@ -109,6 +138,12 @@ try {
 
   const rowCount = rows.length;
   const uiLoadedCount = rows.filter((row) => row.uiImageComplete && row.uiNaturalWidth > 0).length;
+  const ratioMatchesCount = rows.filter((row) => {
+    const originalRatio = row.originalWidth / row.originalHeight;
+    const thumbnailRatio = row.thumbnailWidth / row.thumbnailHeight;
+
+    return Math.abs(originalRatio - thumbnailRatio) < 0.02;
+  }).length;
 
   if (rowCount !== supportedImportEntries.length) {
     throw new Error(`Expected ${supportedImportEntries.length} assets in the UI, found ${rowCount}.`);
@@ -132,6 +167,10 @@ try {
       mime: row.mime,
       originalPath: row.originalPath,
       thumbnailPath: row.thumbnailPath,
+      originalWidth: row.originalWidth,
+      originalHeight: row.originalHeight,
+      thumbnailWidth: row.thumbnailWidth,
+      thumbnailHeight: row.thumbnailHeight,
       uiImageSrc: row.uiImageSrc,
       uiImageComplete: row.uiImageComplete,
       uiNaturalWidth: row.uiNaturalWidth,
@@ -157,7 +196,7 @@ try {
       table { width: 100%; border-collapse: collapse; background: #fffdf8; border: 1px solid #d8d0c2; }
       th, td { padding: 12px; border-bottom: 1px solid #e7dfd2; vertical-align: top; text-align: left; font-size: 14px; }
       th { background: #f7efe1; letter-spacing: 0.04em; text-transform: uppercase; font-size: 12px; }
-      img.thumb { width: 96px; height: 96px; object-fit: cover; border-radius: 10px; border: 1px solid #d8d0c2; background: #ffffff; }
+      img.thumb { width: 96px; height: 96px; object-fit: contain; border-radius: 10px; border: 1px solid #d8d0c2; background: #ffffff; }
       code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
     </style>
   </head>
@@ -169,6 +208,7 @@ try {
         <div class="pill">Imported: ${payload.imported}</div>
         <div class="pill">Skipped: ${payload.skipped}</div>
         <div class="pill">Loaded UI thumbs: ${uiLoadedCount}/${supportedImportEntries.length}</div>
+        <div class="pill">Aspect-preserving thumbs: ${ratioMatchesCount}/${supportedImportEntries.length}</div>
         <div class="pill">Message: ${payload.uiMessage}</div>
       </div>
       <img class="shot" src="${path.basename(screenshotPath)}" alt="Electron import grid" />
@@ -179,6 +219,7 @@ try {
             <th>Asset</th>
             <th>MIME</th>
             <th>UI Load</th>
+            <th>Dimensions</th>
             <th>Stored Paths</th>
           </tr>
         </thead>
@@ -190,6 +231,7 @@ try {
             <td><strong>${row.cardName}</strong><br /><code>${row.id}</code></td>
             <td><code>${row.mime}</code></td>
             <td><code>complete=${row.uiImageComplete}</code><br /><code>${row.uiNaturalWidth}x${row.uiNaturalHeight}</code></td>
+            <td><code>original=${row.originalWidth}x${row.originalHeight}</code><br /><code>thumb=${row.thumbnailWidth}x${row.thumbnailHeight}</code></td>
             <td><code>${row.originalPath}</code><br /><code>${row.thumbnailPath}</code></td>
           </tr>`
             )

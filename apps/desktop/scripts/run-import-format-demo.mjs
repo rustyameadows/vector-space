@@ -15,8 +15,18 @@ const { ImportService } = await import(path.join(appDir, 'dist/main/services/imp
 const { getImageMetadata } = await import(path.join(appDir, 'dist/main/services/imageProcessing.js'));
 const {
   supportedImportEntries,
-  materializeImportFixtures
+  materializeImportFixtures,
+  resizeFixtureImage
 } = await import(path.join(appDir, 'dist/main/test-support/importFixtures.js'));
+
+const fixtureSizes = [
+  { width: 928, height: 1232 },
+  { width: 1630, height: 337 },
+  { width: 2224, height: 1668 },
+  { width: 1320, height: 2868 },
+  { width: 2360, height: 867 }
+];
+const resizableExtensions = new Set(['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif']);
 
 class CaptureDb {
   constructor() {
@@ -27,8 +37,8 @@ class CaptureDb {
     return this.inserts.find((entry) => entry.asset.checksum === checksum)?.asset.id ?? null;
   }
 
-  insertAsset(asset, originalPath, originalSize, thumbPath, metadata) {
-    this.inserts.push({ asset, originalPath, originalSize, thumbPath, metadata });
+  insertAsset(asset, originalPath, originalSize, thumbnail, metadata) {
+    this.inserts.push({ asset, originalPath, originalSize, thumbnail, metadata });
   }
 }
 
@@ -37,6 +47,16 @@ await mkdir(fixtureOutputDir, { recursive: true });
 await mkdir(tempHome, { recursive: true });
 
 const inputPaths = await materializeImportFixtures(fixtureOutputDir);
+await Promise.all(
+  inputPaths.map((inputPath, index) => {
+    if (!resizableExtensions.has(path.extname(inputPath).toLowerCase())) {
+      return Promise.resolve();
+    }
+
+    const size = fixtureSizes[index % fixtureSizes.length];
+    return resizeFixtureImage(inputPath, size.width, size.height);
+  })
+);
 
 const db = new CaptureDb();
 const service = new ImportService(db);
@@ -44,8 +64,8 @@ const result = await service.importPaths(inputPaths, 'file-picker');
 
 const rows = await Promise.all(
   db.inserts.map(async (entry) => {
-    const thumbBytes = await readFile(entry.thumbPath);
-    const thumbMetadata = await getImageMetadata(entry.thumbPath);
+    const thumbBytes = await readFile(entry.thumbnail.path);
+    const thumbMetadata = await getImageMetadata(entry.thumbnail.path);
 
     return {
       source: path.basename(entry.asset.sourcePath),
@@ -53,9 +73,10 @@ const rows = await Promise.all(
       width: entry.asset.width,
       height: entry.asset.height,
       originalPath: entry.originalPath,
-      thumbnailPath: entry.thumbPath,
+      thumbnailPath: entry.thumbnail.path,
       thumbnailWidth: thumbMetadata.width,
       thumbnailHeight: thumbMetadata.height,
+      thumbnailAspectRatio: Number((thumbMetadata.width / thumbMetadata.height).toFixed(3)),
       thumbnailDataUrl: `data:image/png;base64,${thumbBytes.toString('base64')}`
     };
   })
@@ -88,7 +109,7 @@ const html = `<!doctype html>
       table { width: 100%; border-collapse: collapse; background: #fffdf8; border: 1px solid #d8d0c2; }
       th, td { padding: 12px; border-bottom: 1px solid #e7dfd2; vertical-align: top; text-align: left; font-size: 14px; }
       th { background: #f7efe1; letter-spacing: 0.04em; text-transform: uppercase; font-size: 12px; }
-      img { width: 96px; height: 96px; object-fit: cover; border-radius: 10px; border: 1px solid #d8d0c2; background: #ffffff; }
+      img { width: 96px; height: 96px; object-fit: contain; border-radius: 10px; border: 1px solid #d8d0c2; background: #ffffff; }
       code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
       .summary { display: flex; gap: 12px; margin: 20px 0 24px; }
       .pill { background: #1b1a18; color: #fffdf8; border-radius: 999px; padding: 8px 14px; font-size: 13px; }
@@ -121,7 +142,7 @@ const html = `<!doctype html>
             <td><strong>${row.source}</strong><br /><code>${row.width}x${row.height}</code></td>
             <td><code>${row.mime}</code></td>
             <td><code>${row.originalPath}</code></td>
-            <td><code>${row.thumbnailPath}</code><br /><code>${row.thumbnailWidth}x${row.thumbnailHeight} PNG</code></td>
+            <td><code>${row.thumbnailPath}</code><br /><code>${row.thumbnailWidth}x${row.thumbnailHeight} PNG</code><br /><code>ratio=${row.thumbnailAspectRatio}</code></td>
           </tr>`
             )
             .join('')}

@@ -14,6 +14,7 @@
     "proof:imports": "npm run build:main && node ./scripts/run-import-format-demo.mjs",
     "proof:model-lock": "npm run build:main && node ./scripts/run-gemini-model-lock-proof.mjs",
     "rebuild:native": "node ./scripts/rebuild-native.mjs",
+    "smoke:electron": "npm run build && node ./scripts/run-electron-import-smoke.mjs",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "package:mac": "npm run build && npm run rebuild:native && node ./scripts/package-mac.mjs",
     "test": "vitest run && node ./scripts/verify-gemini-model-lock.mjs",

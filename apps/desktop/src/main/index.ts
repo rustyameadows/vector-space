@@ -26,6 +26,7 @@ import {
 } from '../shared/gemini';
 import { IndexingService } from './services/indexingService';
 import { HybridSearchService } from './search/hybridSearch';
+import { ThumbnailMaintenanceService } from './services/thumbnailMaintenance';
 import type { IndexJobView, SearchMode } from './types/domain';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
@@ -47,6 +48,7 @@ let db: VectorSpaceDb;
 let importService: ImportService;
 let indexingService: IndexingService;
 let searchService: HybridSearchService;
+let thumbnailMaintenanceService: ThumbnailMaintenanceService;
 let embeddingProvider: EmbeddingProvider | null = null;
 let online = true;
 const isKeychainDisabled = process.env.VECTOR_SPACE_DISABLE_KEYCHAIN === '1';
@@ -479,6 +481,7 @@ app.whenReady().then(async () => {
       embed: async (request) => requireEmbeddingProvider().embed(request)
     });
     searchService = new HybridSearchService(db);
+    thumbnailMaintenanceService = new ThumbnailMaintenanceService(db);
     registerIpc();
   } catch (error: unknown) {
     if (error instanceof LibraryPathError) {
@@ -494,6 +497,9 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
+  void thumbnailMaintenanceService.repairGridThumbnails().catch((error: unknown) => {
+    console.error('Failed to repair grid thumbnails during startup', error);
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

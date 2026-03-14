@@ -23,6 +23,8 @@ export interface ImageMetadata {
   format: string;
 }
 
+export const GRID_THUMBNAIL_MAX_EDGE = 320;
+
 const ensureParentDirectory = async (filePath: string): Promise<void> => {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 };
@@ -69,17 +71,21 @@ export const getImageMetadata = async (sourcePath: string): Promise<ImageMetadat
   return { width, height, format };
 };
 
-export const createThumbnail = async (sourcePath: string, outputPath: string): Promise<void> => {
+export const createThumbnail = async (
+  sourcePath: string,
+  outputPath: string
+): Promise<ImageMetadata> => {
   await ensureParentDirectory(outputPath);
   await execFileAsync(SIPS_PATH, [
     '-s',
     'format',
     'png',
-    '-z',
-    '320',
-    '320',
+    '-Z',
+    `${GRID_THUMBNAIL_MAX_EDGE}`,
     sourcePath,
     '--out',
     outputPath
   ]);
+
+  return getImageMetadata(outputPath);
 };

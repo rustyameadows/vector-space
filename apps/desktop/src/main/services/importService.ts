@@ -88,7 +88,7 @@ export class ImportService {
 
       await fs.mkdir(path.dirname(originalAbsolute), { recursive: true });
       await fs.copyFile(inputPath, originalAbsolute);
-      await createThumbnail(originalAbsolute, thumbAbsolute);
+      const thumbnail = await createThumbnail(originalAbsolute, thumbAbsolute);
 
       const asset: AssetRecord = {
         id,
@@ -105,17 +105,28 @@ export class ImportService {
       const title = deriveTitleFromPath(inputPath);
       const retrievalCaption = createRetrievalCaption(title, size.width, size.height, asset.mime);
 
-      this.db.insertAsset(asset, originalAbsolute, sourceStat.size, thumbAbsolute, {
-        title,
-        userNote: '',
-        retrievalCaption,
-        metadataJson: JSON.stringify({
-          sourceType: 'image',
-          aspectRatio: Number((size.width / Math.max(size.height, 1)).toFixed(3)),
-          layoutType: deriveLayoutHint(size.width, size.height),
-          embeddingVersion: GEMINI_EMBEDDING_VERSION
-        })
-      });
+      this.db.insertAsset(
+        asset,
+        originalAbsolute,
+        sourceStat.size,
+        {
+          path: thumbAbsolute,
+          width: thumbnail.width,
+          height: thumbnail.height,
+          updatedAt: asset.createdAt
+        },
+        {
+          title,
+          userNote: '',
+          retrievalCaption,
+          metadataJson: JSON.stringify({
+            sourceType: 'image',
+            aspectRatio: Number((size.width / Math.max(size.height, 1)).toFixed(3)),
+            layoutType: deriveLayoutHint(size.width, size.height),
+            embeddingVersion: GEMINI_EMBEDDING_VERSION
+          })
+        }
+      );
       imported += 1;
     }
 

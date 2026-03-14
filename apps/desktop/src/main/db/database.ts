@@ -43,6 +43,7 @@ const MIGRATIONS = [
     local_path TEXT NOT NULL,
     width INTEGER NOT NULL,
     height INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
     PRIMARY KEY(asset_id, variant),
     FOREIGN KEY(asset_id) REFERENCES assets(id)
   );`,
@@ -115,7 +116,8 @@ const ALTERS = [
   `ALTER TABLE assets ADD COLUMN title TEXT NOT NULL DEFAULT '';`,
   `ALTER TABLE assets ADD COLUMN user_note TEXT NOT NULL DEFAULT '';`,
   `ALTER TABLE assets ADD COLUMN retrieval_caption TEXT NOT NULL DEFAULT '';`,
-  `ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';`
+  `ALTER TABLE assets ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';`,
+  `ALTER TABLE thumbnails ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';`
 ];
 
 export class VectorSpaceDb {
@@ -138,6 +140,14 @@ export class VectorSpaceDb {
           // no-op when column already exists
         }
       });
+      this.db.exec(
+        `UPDATE thumbnails
+         SET updated_at = COALESCE(
+           NULLIF(updated_at, ''),
+           (SELECT created_at FROM assets WHERE assets.id = thumbnails.asset_id),
+           CURRENT_TIMESTAMP
+         )`
+      );
     });
     tx();
   }
@@ -154,7 +164,12 @@ export class VectorSpaceDb {
     asset: AssetRecord,
     originalPath: string,
     originalSize: number,
-    thumbPath: string,
+    thumbnail: {
+      path: string;
+      width: number;
+      height: number;
+      updatedAt?: string;
+    },
     metadata: {
       title: string;
       userNote: string;
@@ -196,12 +211,49 @@ export class VectorSpaceDb {
 
       this.db
         .prepare(
-          'INSERT INTO thumbnails(asset_id, variant, local_path, width, height) VALUES (?, ?, ?, ?, ?)'
+          `INSERT INTO thumbnails(asset_id, variant, local_path, width, height, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
         )
-        .run(asset.id, 'grid', thumbPath, 320, 320);
+        .run(
+          asset.id,
+          'grid',
+          thumbnail.path,
+          thumbnail.width,
+          thumbnail.height,
+          thumbnail.updatedAt ?? asset.createdAt
+        );
     });
 
     insert();
+  }
+
+  public upsertGridThumbnail(
+    assetId: string,
+    thumbnail: {
+      path: string;
+      width: number;
+      height: number;
+      updatedAt?: string;
+    }
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO thumbnails(asset_id, variant, local_path, width, height, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(asset_id, variant) DO UPDATE SET
+           local_path = excluded.local_path,
+           width = excluded.width,
+           height = excluded.height,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        assetId,
+        'grid',
+        thumbnail.path,
+        thumbnail.width,
+        thumbnail.height,
+        thumbnail.updatedAt ?? new Date().toISOString()
+      );
   }
 
   public replaceAssetTextChunks(
@@ -328,6 +380,7 @@ export class VectorSpaceDb {
       .prepare(
         `SELECT a.id, a.created_at, a.mime, a.width, a.height, a.status, a.retrieval_caption,
         t.local_path as thumbnail_path,
+        t.updated_at as thumbnail_updated_at,
         of.local_path as original_path
         FROM assets a
         LEFT JOIN thumbnails t ON t.asset_id = a.id AND t.variant='grid'
@@ -343,6 +396,7 @@ export class VectorSpaceDb {
       status: 'imported' | 'indexing' | 'ready' | 'failed';
       retrieval_caption: string;
       thumbnail_path: string | null;
+      thumbnail_updated_at: string | null;
       original_path: string;
     }>;
 
@@ -354,10 +408,59 @@ export class VectorSpaceDb {
       height: row.height,
       status: row.status,
       thumbnailPath: row.thumbnail_path,
+      thumbnailUpdatedAt: row.thumbnail_updated_at,
       originalPath: row.original_path,
       retrievalCaption: row.retrieval_caption,
       tags: this.listTagsForAsset(row.id),
       collections: this.listCollectionsForAsset(row.id)
+    }));
+  }
+
+  public listAssetsForThumbnailMaintenance(): Array<{
+    assetId: string;
+    originalPath: string;
+    originalWidth: number;
+    originalHeight: number;
+    thumbnailPath: string | null;
+    thumbnailWidth: number | null;
+    thumbnailHeight: number | null;
+    thumbnailUpdatedAt: string | null;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT a.id as asset_id,
+          a.width as original_width,
+          a.height as original_height,
+          of.local_path as original_path,
+          t.local_path as thumbnail_path,
+          t.width as thumbnail_width,
+          t.height as thumbnail_height,
+          t.updated_at as thumbnail_updated_at
+        FROM assets a
+        LEFT JOIN asset_files of ON of.asset_id = a.id AND of.role='original'
+        LEFT JOIN thumbnails t ON t.asset_id = a.id AND t.variant='grid'
+        ORDER BY a.created_at DESC`
+      )
+      .all() as Array<{
+      asset_id: string;
+      original_path: string;
+      original_width: number;
+      original_height: number;
+      thumbnail_path: string | null;
+      thumbnail_width: number | null;
+      thumbnail_height: number | null;
+      thumbnail_updated_at: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      assetId: row.asset_id,
+      originalPath: row.original_path,
+      originalWidth: row.original_width,
+      originalHeight: row.original_height,
+      thumbnailPath: row.thumbnail_path,
+      thumbnailWidth: row.thumbnail_width,
+      thumbnailHeight: row.thumbnail_height,
+      thumbnailUpdatedAt: row.thumbnail_updated_at
     }));
   }
 

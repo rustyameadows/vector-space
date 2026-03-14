@@ -6,6 +6,7 @@ import {
   shouldBlockViewerKeyboardNavigation,
   viewerAssetStillVisible
 } from './assetViewer';
+import { buildLibraryAssetUrl, buildThumbnailSrc } from './assetUrls';
 
 type Asset = {
   id: string;
@@ -15,6 +16,7 @@ type Asset = {
   height: number;
   status: 'imported' | 'indexing' | 'ready' | 'failed';
   thumbnailPath: string | null;
+  thumbnailUpdatedAt: string | null;
   originalPath: string;
   tags: string[];
   collections: string[];
@@ -132,6 +134,7 @@ const createPreviewApi = (): VectorSpaceApi => {
       height,
       status,
       thumbnailPath: createPreviewThumb(`DEMO ${index + 1}`, palette),
+      thumbnailUpdatedAt: new Date(Date.now() - index * 3_600_000).toISOString(),
       originalPath: `/demo/color-study-${sequence}.png`,
       tags: index % 2 === 0 ? ['color'] : ['demo'],
       collections: index % 3 === 0 ? ['showcase'] : ['seed']
@@ -487,13 +490,7 @@ export const App = () => {
         : 'Queue idle';
 
   const getAssetImageSrc = (asset: Asset) => {
-    if (!asset.thumbnailPath) {
-      return null;
-    }
-
-    return asset.thumbnailPath.startsWith('data:')
-      ? asset.thumbnailPath
-      : `app://renderer/library-asset?path=${encodeURIComponent(asset.thumbnailPath)}`;
+    return buildThumbnailSrc(asset);
   };
 
   const getAssetOriginalSrc = (asset: Asset) => {
@@ -508,7 +505,7 @@ export const App = () => {
       return maybePreviewFallback;
     }
 
-    return `app://renderer/library-asset?path=${encodeURIComponent(asset.originalPath)}`;
+    return buildLibraryAssetUrl(asset.originalPath);
   };
 
   useEffect(() => {

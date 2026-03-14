@@ -79,3 +79,11 @@ export const materializeImportFixtures = async (targetDir: string): Promise<stri
 
   return paths;
 };
+
+export const resizeFixtureImage = async (
+  sourcePath: string,
+  width: number,
+  height: number
+): Promise<void> => {
+  await execFileAsync(SIPS_PATH, ['-z', `${height}`, `${width}`, sourcePath, '--out', sourcePath]);
+};

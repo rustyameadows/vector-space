@@ -39,6 +39,7 @@ export interface AppAssetView {
   height: number;
   status: AssetStatus;
   thumbnailPath: string | null;
+  thumbnailUpdatedAt: string | null;
   originalPath: string;
   tags: string[];
   collections: string[];

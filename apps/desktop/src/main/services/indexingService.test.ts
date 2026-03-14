@@ -45,6 +45,7 @@ class FakeDb {
       height: 16,
       status: asset.status,
       thumbnailPath: null,
+      thumbnailUpdatedAt: null,
       originalPath: asset.originalPath,
       tags: asset.tags,
       collections: asset.collections,

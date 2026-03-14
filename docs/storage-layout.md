@@ -9,7 +9,7 @@ Vector Space uses a local-first library layout rooted on macOS at:
 At startup, the app creates and verifies the following folders:
 
 - `originals/` — source assets for ingest.
-- `thumbnails/` — generated preview images.
+- `thumbnails/` — generated preview images with aspect-ratio-preserving grid derivatives.
 - `db/` — app-local database and metadata state.
 - `temp/` — temporary files used for ingest and processing.
 
@@ -41,6 +41,7 @@ On app startup:
 3. A write probe is executed in `temp/` to verify disk write access.
 4. Permission and disk-write failures are mapped to user-safe error messages.
 5. Electron `userData` path is redirected to `db/` for local metadata persistence.
+6. Existing grid thumbnails are checked and repaired in the background when their stored preview aspect ratio is invalid or the derivative is missing.
 
 ## Error Handling Contract
 

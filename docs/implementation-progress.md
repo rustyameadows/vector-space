@@ -20,7 +20,7 @@ This file records progress while implementing `IMPLEMENTATION_PLAN_V1.md` end-to
 2. **Ingestion implementation**
    - Added import service for file paths and recursive folder ingestion.
    - Added hash-based dedupe using SHA-256 checksum.
-   - Added deterministic managed-storage copying and thumbnail generation via Electron `nativeImage`.
+   - Added deterministic managed-storage copying and thumbnail generation via macOS `sips`.
 
 3. **Indexing and embeddings**
    - Added `EmbeddingProvider` abstraction and Gemini-compatible provider implementation stub.
@@ -44,3 +44,8 @@ This file records progress while implementing `IMPLEMENTATION_PLAN_V1.md` end-to
    - Removed deterministic fallback embeddings to enforce Gemini as the only embedding source.
    - Added in-app API key management and persisted credentials in macOS Keychain.
    - Added integration notes documenting API contract and keychain-based runtime setup.
+
+8. **Thumbnail hardening**
+   - Switched grid thumbnail generation to preserve original aspect ratio instead of forcing square derivatives.
+   - Persisted real thumbnail dimensions and revision timestamps in SQLite.
+   - Added startup maintenance to auto-repair missing or previously stretched grid thumbnails for existing libraries.
